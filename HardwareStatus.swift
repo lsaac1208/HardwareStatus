@@ -6,616 +6,8 @@ import QuartzCore
 @_silgen_name("hw_phys_footprint")
 func hw_phys_footprint(_ pid: Int32) -> UInt64
 
-// MARK: - Design tokens (compact single-layer panel)
-enum HIG {
-    static let panelW: CGFloat = 360
-    static let panelH: CGFloat = 560
-    static let insetX: CGFloat = 20
-    static let insetTop: CGFloat = 18
-    static let groupGap: CGFloat = 14
-    static let rowGap: CGFloat = 10
-    static let iconSize: CGFloat = 18
-    static let barH: CGFloat = 4
-    // Process table shared columns (header + rows)
-    static let procMenuW: CGFloat = 20
-    static let procMemW: CGFloat = 58
-    static let procCpuW: CGFloat = 50
-    static let procArrowW: CGFloat = 12
-    static let procColGap: CGFloat = 6
-    static var title2: NSFont { .systemFont(ofSize: 17, weight: .semibold) }
-    static var valuePrimary: NSFont { .monospacedDigitSystemFont(ofSize: 17, weight: .semibold) }
-    static var valueSecondary: NSFont { .monospacedDigitSystemFont(ofSize: 15, weight: .semibold) }
-    static var valueUnit: NSFont { .systemFont(ofSize: 12, weight: .regular) }
-    static var name: NSFont { .systemFont(ofSize: 13, weight: .regular) }
-    static var body: NSFont { .systemFont(ofSize: 13, weight: .regular) }
-    static var callout: NSFont { .systemFont(ofSize: 12, weight: .regular) }
-    static var caption: NSFont { .systemFont(ofSize: 11, weight: .regular) }
-    static var monoSm: NSFont { .monospacedDigitSystemFont(ofSize: 12, weight: .regular) }
-    static var status: NSFont { .monospacedDigitSystemFont(ofSize: 11, weight: .medium) }
-    static var section: NSFont { .systemFont(ofSize: 12, weight: .regular) }
-}
-
-private func label(_ s: String = "", font: NSFont, color: NSColor = .labelColor) -> NSTextField {
-    let t = NSTextField(labelWithString: s)
-    t.font = font
-    t.textColor = color
-    t.drawsBackground = false
-    t.isBordered = false
-    t.lineBreakMode = .byTruncatingTail
-    t.translatesAutoresizingMaskIntoConstraints = false
-    return t
-}
-
-final class FlippedView: NSView { override var isFlipped: Bool { true } }
-
-final class Hairline: NSView {
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        applyColor()
-        translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 1).isActive = true
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    private func applyColor() {
-        // System divider color, slightly softened — avoid hard deep-gray cuts
-        layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
-    }
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        applyColor()
-    }
-}
-
-final class ProgressTrack: NSView {
-    private let fill = CALayer()
-    private var frac: CGFloat = 0
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        layer?.cornerRadius = HIG.barH / 2
-        layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.12).cgColor
-        fill.cornerRadius = HIG.barH / 2
-        fill.backgroundColor = NSColor.controlAccentColor.cgColor
-        layer?.addSublayer(fill)
-        translatesAutoresizingMaskIntoConstraints = false
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    func set(_ value: Double, warnAt: Double = 75, criticalAt: Double = 90) {
-        frac = CGFloat(min(1, max(0, value / 100)))
-        let c: NSColor
-        if value >= criticalAt { c = .systemRed }
-        else if value >= warnAt { c = .systemOrange }
-        else { c = .controlAccentColor }
-        fill.backgroundColor = c.cgColor
-        needsLayout = true
-    }
-    override func layout() {
-        super.layout()
-        fill.frame = CGRect(x: 0, y: 0, width: bounds.width * frac, height: bounds.height)
-    }
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.12).cgColor
-    }
-}
-
-final class SegmentBar: NSView {
-    private var parts: [(CGFloat, NSColor)] = []
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        layer?.cornerRadius = HIG.barH / 2
-        layer?.masksToBounds = true
-        translatesAutoresizingMaskIntoConstraints = false
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    func set(parts items: [(Double, NSColor)], total: Double) {
-        let t = max(total, 1)
-        var mapped = items.map { (CGFloat(min(1, max(0, $0.0 / t))), $0.1) }
-        let sum = mapped.reduce(CGFloat(0)) { $0 + $1.0 }
-        if sum > 1, sum > 0 { mapped = mapped.map { ($0.0 / sum, $0.1) } }
-        parts = mapped
-        needsDisplay = true
-    }
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.separatorColor.withAlphaComponent(0.12).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: HIG.barH/2, yRadius: HIG.barH/2).fill()
-        var x: CGFloat = 0
-        for (f, c) in parts {
-            let w = bounds.width * f
-            c.setFill()
-            NSBezierPath(rect: NSRect(x: x, y: 0, width: max(0, w), height: bounds.height)).fill()
-            x += w
-        }
-    }
-}
-
-// MARK: - Primary metric row
-final class MetricRow: NSView {
-    let symbolView = NSImageView()
-    let titleLabel = label("", font: HIG.name)
-    let valueLabel = label("", font: HIG.valuePrimary, color: .labelColor)
-    let detailLabel = label("", font: HIG.caption, color: .secondaryLabelColor)
-    let expandBtn = NSButton()
-    let track = ProgressTrack()
-    let segments = SegmentBar()
-    var usesSegments = false {
-        didSet { track.isHidden = usesSegments; segments.isHidden = !usesSegments }
-    }
-    private(set) var detailExpanded = false
-    var alwaysShowDetail = false
-    var onToggleDetail: (() -> Void)?
-    private var detailH: NSLayoutConstraint!
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        translatesAutoresizingMaskIntoConstraints = false
-        symbolView.translatesAutoresizingMaskIntoConstraints = false
-        symbolView.imageScaling = .scaleProportionallyUpOrDown
-        valueLabel.alignment = .right
-        segments.isHidden = true
-        expandBtn.isBordered = false
-        expandBtn.imagePosition = .imageOnly
-        expandBtn.translatesAutoresizingMaskIntoConstraints = false
-        expandBtn.contentTintColor = .tertiaryLabelColor
-        let chevron = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "详情")
-        expandBtn.image = chevron?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold))
-        expandBtn.target = self
-        expandBtn.action = #selector(toggle)
-        expandBtn.isHidden = true
-        [symbolView, titleLabel, valueLabel, expandBtn, detailLabel, track, segments].forEach(addSubview)
-        detailH = detailLabel.heightAnchor.constraint(equalToConstant: 16)
-        NSLayoutConstraint.activate([
-            symbolView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            symbolView.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            symbolView.widthAnchor.constraint(equalToConstant: 16),
-            symbolView.heightAnchor.constraint(equalToConstant: 16),
-            titleLabel.leadingAnchor.constraint(equalTo: symbolView.trailingAnchor, constant: 8),
-            titleLabel.centerYAnchor.constraint(equalTo: symbolView.centerYAnchor),
-            expandBtn.trailingAnchor.constraint(equalTo: trailingAnchor),
-            expandBtn.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            expandBtn.widthAnchor.constraint(equalToConstant: 18),
-            expandBtn.heightAnchor.constraint(equalToConstant: 18),
-            valueLabel.trailingAnchor.constraint(equalTo: expandBtn.leadingAnchor, constant: -2),
-            valueLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 8),
-            valueLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 48),
-            track.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            track.trailingAnchor.constraint(equalTo: trailingAnchor),
-            track.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-            track.heightAnchor.constraint(equalToConstant: HIG.barH),
-            segments.leadingAnchor.constraint(equalTo: track.leadingAnchor),
-            segments.trailingAnchor.constraint(equalTo: track.trailingAnchor),
-            segments.topAnchor.constraint(equalTo: track.topAnchor),
-            segments.heightAnchor.constraint(equalTo: track.heightAnchor),
-            detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            detailLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-            detailLabel.topAnchor.constraint(equalTo: track.bottomAnchor, constant: 6),
-            detailH,
-            detailLabel.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    func enableDetail(_ on: Bool) { expandBtn.isHidden = !on }
-    func setExpanded(_ on: Bool) {
-        detailExpanded = on
-        expandBtn.state = on ? .on : .off
-        detailLabel.maximumNumberOfLines = on ? 2 : 1
-        detailLabel.lineBreakMode = on ? .byWordWrapping : .byTruncatingTail
-        if alwaysShowDetail {
-            detailLabel.isHidden = false
-            detailH.constant = on ? 28 : 16
-        } else {
-            detailLabel.isHidden = !on
-            detailH.constant = on ? 28 : 0
-        }
-    }
-    @objc private func toggle() {
-        setExpanded(!detailExpanded)
-        onToggleDetail?()
-    }
-    func setSymbol(_ name: String) {
-        let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)
-        symbolView.image = img?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .medium))
-        symbolView.contentTintColor = .secondaryLabelColor
-    }
-}
-
-final class CompactValue: NSView {
-    let titleLabel = label("", font: HIG.caption, color: .secondaryLabelColor)
-    let valueLabel = label("", font: HIG.valueSecondary, color: .labelColor)
-    let unitLabel = label("", font: HIG.valueUnit, color: .secondaryLabelColor)
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        translatesAutoresizingMaskIntoConstraints = false
-        [titleLabel, valueLabel, unitLabel].forEach(addSubview)
-        NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
-            titleLabel.topAnchor.constraint(equalTo: topAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
-            valueLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
-            valueLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            valueLabel.bottomAnchor.constraint(equalTo: bottomAnchor),
-            unitLabel.leadingAnchor.constraint(equalTo: valueLabel.trailingAnchor, constant: 4),
-            unitLabel.firstBaselineAnchor.constraint(equalTo: valueLabel.firstBaselineAnchor),
-            unitLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor)
-        ])
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    func setValue(_ value: String, unit: String) {
-        valueLabel.stringValue = value
-        unitLabel.stringValue = unit
-        unitLabel.isHidden = unit.isEmpty
-    }
-}
-
-final class IORow: NSView {
-    let symbolView = NSImageView()
-    let titleLabel = label("", font: HIG.name)
-    let valueLabel = label("", font: HIG.monoSm, color: .labelColor)
-    let track = ProgressTrack()
-    var showsTrack = true {
-        didSet { track.isHidden = !showsTrack; trackH.constant = showsTrack ? HIG.barH : 0 }
-    }
-    private var trackH: NSLayoutConstraint!
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        translatesAutoresizingMaskIntoConstraints = false
-        symbolView.translatesAutoresizingMaskIntoConstraints = false
-        symbolView.imageScaling = .scaleProportionallyUpOrDown
-        valueLabel.alignment = .right
-        [symbolView, titleLabel, valueLabel, track].forEach(addSubview)
-        trackH = track.heightAnchor.constraint(equalToConstant: HIG.barH)
-        NSLayoutConstraint.activate([
-            symbolView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            symbolView.topAnchor.constraint(equalTo: topAnchor, constant: 1),
-            symbolView.widthAnchor.constraint(equalToConstant: 14),
-            symbolView.heightAnchor.constraint(equalToConstant: 14),
-            titleLabel.leadingAnchor.constraint(equalTo: symbolView.trailingAnchor, constant: 8),
-            titleLabel.centerYAnchor.constraint(equalTo: symbolView.centerYAnchor),
-            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-            valueLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 8),
-            valueLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
-            track.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            track.trailingAnchor.constraint(equalTo: trailingAnchor),
-            track.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
-            trackH,
-            track.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    func setSymbol(_ name: String) {
-        let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)
-        symbolView.image = img?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .medium))
-        symbolView.contentTintColor = .secondaryLabelColor
-    }
-}
-
-final class AppProcRow: NSView {
-    let iconView = NSImageView()
-    let nameLabel = label("", font: HIG.body)
-    let cpuLabel = label("", font: HIG.monoSm, color: .secondaryLabelColor)
-    let memLabel = label("", font: HIG.monoSm, color: .secondaryLabelColor)
-    let menuBtn = NSButton()
-    var onMenu: (() -> Void)?
-    var pid: Int32 = 0
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        translatesAutoresizingMaskIntoConstraints = false
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.imageScaling = .scaleProportionallyUpOrDown
-        iconView.wantsLayer = true
-        iconView.layer?.cornerRadius = 4
-        iconView.layer?.masksToBounds = true
-        menuBtn.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "操作")
-        menuBtn.isBordered = false
-        menuBtn.imagePosition = .imageOnly
-        menuBtn.target = self
-        menuBtn.action = #selector(tap)
-        menuBtn.translatesAutoresizingMaskIntoConstraints = false
-        menuBtn.contentTintColor = .tertiaryLabelColor
-        cpuLabel.alignment = .right
-        memLabel.alignment = .right
-        [iconView, nameLabel, cpuLabel, memLabel, menuBtn].forEach(addSubview)
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 28),
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: HIG.iconSize),
-            iconView.heightAnchor.constraint(equalToConstant: HIG.iconSize),
-            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
-            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            menuBtn.trailingAnchor.constraint(equalTo: trailingAnchor),
-            menuBtn.centerYAnchor.constraint(equalTo: centerYAnchor),
-            menuBtn.widthAnchor.constraint(equalToConstant: HIG.procMenuW),
-            menuBtn.heightAnchor.constraint(equalToConstant: HIG.procMenuW),
-            // mem / cpu share exact columns with SortHeader (arrow reserved between them)
-            memLabel.trailingAnchor.constraint(equalTo: menuBtn.leadingAnchor, constant: -2),
-            memLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            memLabel.widthAnchor.constraint(equalToConstant: HIG.procMemW),
-            cpuLabel.trailingAnchor.constraint(equalTo: memLabel.leadingAnchor, constant: -(HIG.procColGap + HIG.procArrowW)),
-            cpuLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            cpuLabel.widthAnchor.constraint(equalToConstant: HIG.procCpuW),
-            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: cpuLabel.leadingAnchor, constant: -4)
-        ])
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    @objc private func tap() { onMenu?() }
-    func setIcon(_ image: NSImage?) {
-        if let image {
-            let copy = image.copy() as! NSImage
-            copy.size = NSSize(width: HIG.iconSize, height: HIG.iconSize)
-            iconView.image = copy
-            iconView.contentTintColor = nil
-        } else {
-            iconView.image = NSImage(systemSymbolName: "app.fill", accessibilityDescription: nil)
-            iconView.contentTintColor = .tertiaryLabelColor
-        }
-    }
-}
-
-final class SortHeader: NSView {
-    let titleLabel = label("占用最高", font: HIG.section, color: .secondaryLabelColor)
-    let cpuBtn = NSButton()
-    let memBtn = NSButton()
-    let arrowLabel = label("↓", font: HIG.caption, color: .labelColor)
-    var sortByCPU = true { didSet { refreshTitles() } }
-    var onSortCPU: (() -> Void)?
-    var onSortMem: (() -> Void)?
-    private var arrowToCpu: NSLayoutConstraint!
-    private var arrowToMem: NSLayoutConstraint!
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        translatesAutoresizingMaskIntoConstraints = false
-        for b in [cpuBtn, memBtn] {
-            b.isBordered = false
-            b.font = HIG.caption
-            b.translatesAutoresizingMaskIntoConstraints = false
-            b.contentTintColor = .secondaryLabelColor
-            b.alignment = .right
-        }
-        cpuBtn.target = self; cpuBtn.action = #selector(tapCPU)
-        memBtn.target = self; memBtn.action = #selector(tapMem)
-        arrowLabel.alignment = .center
-        [titleLabel, cpuBtn, arrowLabel, memBtn].forEach(addSubview)
-        // Align with AppProcRow: menuW + memW + gap+arrow + cpuW from trailing
-        let menuPad = HIG.procMenuW + 2
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 22),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            memBtn.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -menuPad),
-            memBtn.centerYAnchor.constraint(equalTo: centerYAnchor),
-            memBtn.widthAnchor.constraint(equalToConstant: HIG.procMemW),
-            cpuBtn.trailingAnchor.constraint(equalTo: memBtn.leadingAnchor, constant: -(HIG.procColGap + HIG.procArrowW)),
-            cpuBtn.centerYAnchor.constraint(equalTo: centerYAnchor),
-            cpuBtn.widthAnchor.constraint(equalToConstant: HIG.procCpuW),
-            arrowLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            arrowLabel.widthAnchor.constraint(equalToConstant: HIG.procArrowW)
-        ])
-        // Arrow lives in reserved slot between CPU and 内存 columns
-        arrowToCpu = arrowLabel.leadingAnchor.constraint(equalTo: cpuBtn.trailingAnchor)
-        arrowToMem = arrowLabel.trailingAnchor.constraint(equalTo: memBtn.leadingAnchor)
-        arrowToCpu.isActive = true
-        refreshTitles()
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    private func refreshTitles() {
-        cpuBtn.title = "CPU"
-        memBtn.title = "内存"
-        cpuBtn.contentTintColor = sortByCPU ? .labelColor : .secondaryLabelColor
-        memBtn.contentTintColor = sortByCPU ? .secondaryLabelColor : .labelColor
-        arrowLabel.textColor = .labelColor
-        arrowToCpu.isActive = false
-        arrowToMem.isActive = false
-        if sortByCPU { arrowToCpu.isActive = true }
-        else { arrowToMem.isActive = true }
-    }
-    @objc private func tapCPU() { onSortCPU?() }
-    @objc private func tapMem() { onSortMem?() }
-}
-
-// MARK: - Root panel (single-layer)
-final class MonitorPanelController: NSViewController {
-    let scroll = NSScrollView()
-    let doc = FlippedView()
-    let stack = NSStackView()
-
-    let titleLabel = label("系统状态", font: HIG.title2)
-    let subtitleLabel = label("", font: HIG.caption, color: .secondaryLabelColor)
-    let thermalDot = NSView()
-    let thermalBadge = label("", font: HIG.caption, color: .labelColor)
-
-    let cpuRow = MetricRow()
-    let memRow = MetricRow()
-    let gpuRow = MetricRow()
-    let tempCell = CompactValue()
-    let fanCell = CompactValue()
-    let diskRow = IORow()
-    let netRow = IORow()
-    let sortHeader = SortHeader()
-    var topRows: [AppProcRow] = []
-
-    let footer = NSView()
-    let activityBtn = NSButton()
-    let moreButton = NSButton()
-
-    var sortByCPU = true
-    var onSortChanged: (() -> Void)?
-    var onOpenActivity: (() -> Void)?
-    var onMoreMenu: ((NSButton) -> Void)?
-
-    private let contentW: CGFloat = HIG.panelW - HIG.insetX * 2
-
-    override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: HIG.panelW, height: HIG.panelH))
-        root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.clear.cgColor
-        view = root
-        preferredContentSize = NSSize(width: HIG.panelW, height: HIG.panelH)
-
-        scroll.drawsBackground = false
-        scroll.backgroundColor = .clear
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.contentView.drawsBackground = false
-        root.addSubview(scroll)
-
-        doc.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = HIG.groupGap
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        doc.addSubview(stack)
-        scroll.documentView = doc
-
-        let header = NSView()
-        header.translatesAutoresizingMaskIntoConstraints = false
-        thermalDot.translatesAutoresizingMaskIntoConstraints = false
-        thermalDot.wantsLayer = true
-        thermalDot.layer?.cornerRadius = 3
-        thermalDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
-        thermalBadge.alignment = .left
-        [titleLabel, subtitleLabel, thermalDot, thermalBadge].forEach(header.addSubview)
-        NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor),
-            titleLabel.topAnchor.constraint(equalTo: header.topAnchor),
-            thermalBadge.trailingAnchor.constraint(equalTo: header.trailingAnchor),
-            thermalBadge.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            thermalDot.trailingAnchor.constraint(equalTo: thermalBadge.leadingAnchor, constant: -5),
-            thermalDot.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            thermalDot.widthAnchor.constraint(equalToConstant: 6),
-            thermalDot.heightAnchor.constraint(equalToConstant: 6),
-            thermalDot.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 8),
-            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(equalTo: header.trailingAnchor),
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            subtitleLabel.bottomAnchor.constraint(equalTo: header.bottomAnchor),
-            header.widthAnchor.constraint(equalToConstant: contentW)
-        ])
-
-        cpuRow.setSymbol("cpu"); cpuRow.titleLabel.stringValue = "CPU"
-        cpuRow.enableDetail(true); cpuRow.alwaysShowDetail = true; cpuRow.setExpanded(false)
-        memRow.setSymbol("memorychip"); memRow.titleLabel.stringValue = "内存"
-        memRow.usesSegments = false; memRow.enableDetail(true)
-        memRow.alwaysShowDetail = true; memRow.setExpanded(false)
-        gpuRow.setSymbol("cube"); gpuRow.titleLabel.stringValue = "GPU"
-        gpuRow.enableDetail(false); gpuRow.alwaysShowDetail = false; gpuRow.setExpanded(false)
-        for m in [cpuRow, memRow, gpuRow] {
-            m.widthAnchor.constraint(equalToConstant: contentW).isActive = true
-            m.onToggleDetail = { [weak self] in self?.onSortChanged?() }
-        }
-        let primary = NSStackView(views: [cpuRow, memRow, gpuRow])
-        primary.orientation = .vertical
-        primary.spacing = HIG.rowGap
-        primary.alignment = .leading
-        primary.translatesAutoresizingMaskIntoConstraints = false
-        primary.widthAnchor.constraint(equalToConstant: contentW).isActive = true
-
-        tempCell.titleLabel.stringValue = "CPU 温度"
-        fanCell.titleLabel.stringValue = "风扇转速"
-        let thermo = NSStackView(views: [tempCell, fanCell])
-        thermo.orientation = .horizontal
-        thermo.distribution = .fillEqually
-        thermo.spacing = 16
-        thermo.translatesAutoresizingMaskIntoConstraints = false
-        thermo.widthAnchor.constraint(equalToConstant: contentW).isActive = true
-
-        diskRow.setSymbol("internaldrive"); diskRow.titleLabel.stringValue = "存储"
-        netRow.setSymbol("network"); netRow.titleLabel.stringValue = "网络"; netRow.showsTrack = false
-        for r in [diskRow, netRow] { r.widthAnchor.constraint(equalToConstant: contentW).isActive = true }
-        let io = NSStackView(views: [diskRow, netRow])
-        io.orientation = .vertical; io.spacing = 8; io.alignment = .leading
-        io.translatesAutoresizingMaskIntoConstraints = false
-        io.widthAnchor.constraint(equalToConstant: contentW).isActive = true
-
-        sortHeader.widthAnchor.constraint(equalToConstant: contentW).isActive = true
-        sortHeader.onSortCPU = { [weak self] in
-            guard let self = self else { return }
-            self.sortByCPU = true; self.sortHeader.sortByCPU = true; self.onSortChanged?()
-        }
-        sortHeader.onSortMem = { [weak self] in
-            guard let self = self else { return }
-            self.sortByCPU = false; self.sortHeader.sortByCPU = false; self.onSortChanged?()
-        }
-        let procStack = NSStackView()
-        procStack.orientation = .vertical; procStack.spacing = 4; procStack.alignment = .leading
-        procStack.translatesAutoresizingMaskIntoConstraints = false
-        procStack.addArrangedSubview(sortHeader)
-        for _ in 0..<3 {
-            let row = AppProcRow()
-            row.widthAnchor.constraint(equalToConstant: contentW).isActive = true
-            topRows.append(row)
-            procStack.addArrangedSubview(row)
-        }
-        procStack.widthAnchor.constraint(equalToConstant: contentW).isActive = true
-
-        let h2 = Hairline(); let h3 = Hairline(); let h4 = Hairline()
-        for h in [h2,h3,h4] { h.widthAnchor.constraint(equalToConstant: contentW).isActive = true }
-
-        // No divider under title — whitespace connects header to resources
-        stack.addArrangedSubview(header)
-        stack.addArrangedSubview(primary)
-        stack.addArrangedSubview(h2)
-        stack.addArrangedSubview(thermo)
-        stack.addArrangedSubview(h3)
-        stack.addArrangedSubview(io)
-        stack.addArrangedSubview(h4)
-        stack.addArrangedSubview(procStack)
-
-        stack.setCustomSpacing(18, after: header)
-
-        let clip = scroll.contentView
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: doc.topAnchor, constant: HIG.insetTop),
-            stack.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: HIG.insetX),
-            stack.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -HIG.insetX),
-            stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -12),
-            stack.widthAnchor.constraint(equalToConstant: contentW),
-            doc.topAnchor.constraint(equalTo: clip.topAnchor),
-            doc.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
-            doc.widthAnchor.constraint(equalToConstant: HIG.panelW)
-        ])
-
-        footer.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(footer)
-        activityBtn.title = "活动监视器"
-        activityBtn.bezelStyle = .inline; activityBtn.isBordered = false
-        activityBtn.font = HIG.callout; activityBtn.contentTintColor = .secondaryLabelColor
-        activityBtn.translatesAutoresizingMaskIntoConstraints = false
-        activityBtn.target = self; activityBtn.action = #selector(openActivity)
-        moreButton.title = "更多"
-        moreButton.bezelStyle = .inline; moreButton.isBordered = false
-        moreButton.font = HIG.callout; moreButton.contentTintColor = .secondaryLabelColor
-        moreButton.translatesAutoresizingMaskIntoConstraints = false
-        moreButton.target = self; moreButton.action = #selector(openMore)
-        footer.addSubview(activityBtn); footer.addSubview(moreButton)
-        let footLine = Hairline(); footer.addSubview(footLine)
-        NSLayoutConstraint.activate([
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            footer.heightAnchor.constraint(equalToConstant: 40),
-            footLine.topAnchor.constraint(equalTo: footer.topAnchor),
-            footLine.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: HIG.insetX),
-            footLine.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -HIG.insetX),
-            activityBtn.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: HIG.insetX),
-            activityBtn.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            moreButton.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -HIG.insetX),
-            moreButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            scroll.topAnchor.constraint(equalTo: root.topAnchor),
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: footer.topAnchor)
-        ])
-    }
-    @objc private func openActivity() { onOpenActivity?() }
-    @objc private func openMore() { onMoreMenu?(moreButton) }
-}
+// View layer lives in DesignSystem.swift, PanelComponents.swift,
+// MonitorPanelController.swift and StatusTitle.swift.
 
 enum StatusShowKey: String, CaseIterable {
     case cpu = "showCPU", gpu = "showGPU", mem = "showMem", chip = "showChip"
@@ -639,34 +31,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var moreMenu: NSMenu!
     private var eventMonitor: Any?
     private var timer: Timer?
+    // MARK: Sampling state (main thread only unless noted)
+    private let hostPort: mach_port_t = mach_host_self()  // one send right for app lifetime
+    private var memTotalBytes: UInt64 = 0
+    private var memPageSize: UInt64 = 16384
     private var lastCPUTicks: (user: UInt64, system: UInt64, idle: UInt64, nice: UInt64)?
+    private var lastCPUWall: TimeInterval = 0
+    private var lastCPUValue: Double = 0
     private var lastCPUUserSys: (user: Double, system: Double) = (0, 0)
     private var lastProcCPU: [Int32: (cpu: Double, wall: TimeInterval)] = [:]
+    private var lastProcSampleWall: TimeInterval = 0
+    private var procWarmupPending = false
+    private var procPathBuf = [CChar](repeating: 0, count: 4 * 1024)  // reused by proc_pidpath
+    private var procIdentityCache: [String: (name: String, key: String)] = [:]  // exe path -> (name, appKey)
     private var displayNameCache: [String: String] = [:]
     private var iconCache: [String: NSImage] = [:]
+    private var diskCache: (info: DiskInfo, wall: TimeInterval)?
+    private let diskMaxAge: TimeInterval = 15
     private let idleInterval: TimeInterval = 2.5
     private let menuOpenInterval: TimeInterval = 1.0
     private let prefs = UserDefaults.standard
     private let prefsPrefix = "local.lsaac128.HardwareStatus."
     private let orderKey = "local.lsaac128.HardwareStatus.statusOrder"
-    private let macmonPath = "/opt/homebrew/bin/macmon"
+    // macmon: resolved lazily (Homebrew arm64/x86, PATH); nil = not found, re-probed at most once a minute
+    private var macmonPath: String?
+    private var macmonProbeWall: TimeInterval = -.infinity
+    private var lastMacmonLaunchWall: TimeInterval = -.infinity
+    private let macmonIdleMinInterval: TimeInterval = 5   // panel closed: temps change slowly
+    private let macmonTimeout: TimeInterval = 5
+    // Guarded by tempLock (written on a utility queue, read on main)
     private let tempLock = NSLock()
     private var cachedCpuC: Double?
     private var cachedGpuC: Double?
     private var cachedFanRpm: Int?
-    private var cachedFanMax: Int?
-    private var cachedFanCount: Int = 0
     private var cachedGpuPct: Double?
     private var cachedPE: (p: Double, e: Double, s: Double) = (0, 0, 0)
     private var tempRefreshInFlight = false
-    private var lastNetBytes: (inB: UInt64, outB: UInt64, wall: TimeInterval)?
+    // Per-interface 32-bit if_data counters (see counterDelta)
+    private var lastIfBytes: [String: (inB: UInt32, outB: UInt32)] = [:]
+    private var lastNetWall: TimeInterval?
     private var netDownBps: Double = 0
     private var netUpBps: Double = 0
-    private var netSessionStart: (inB: UInt64, outB: UInt64)?
-    private var netLifetime: (inB: UInt64, outB: UInt64) = (0, 0)
+    // Latest sampled values; UI-only actions (sort / expand / prefs) re-render from here
+    private var snapshot = Snapshot()
+    private var visibleKeysCache: [StatusShowKey]?
+    private var lastStatusTitle = ""
     private var showMenuItems: [StatusShowKey: NSMenuItem] = [:]
     private var orderMenu: NSMenu!
-    private let titleFont = HIG.status
     private var isScreenLocked = false
     private var isSleeping = false
     private var isPanelOpen = false
@@ -678,7 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         seedIdentity(); seedDefaultsIfNeeded(); buildPanel()
         buildPrefsMenu(); buildMoreMenu(); buildStatusItem()
         installLifecycleObservers(); installClickOutsideMonitor()
-        _ = sampleCPU(); _ = sampleProcessesRaw(); _ = sampleNetwork()
+        // CPU/network need a baseline; process baseline is taken lazily when the panel opens
+        _ = sampleCPU(); sampleNetwork()
         refreshTempsAsync(force: true); updateMetrics(); restartTimer(interval: idleInterval)
     }
 
@@ -701,7 +113,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         var mem: UInt64 = 0; var len = MemoryLayout<UInt64>.size
         sysctlbyname("hw.memsize", &mem, &len, nil, 0)
+        memTotalBytes = mem
         memTotalGB = String(format: "%.0f GB", Double(mem) / 1_073_741_824.0)
+        var pageSize: vm_size_t = 0
+        if host_page_size(hostPort, &pageSize) == KERN_SUCCESS, pageSize > 0 { memPageSize = UInt64(pageSize) }
     }
 
     private func buildStatusItem() {
@@ -713,23 +128,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 button.image = img.withSymbolConfiguration(cfg)
                 button.imagePosition = .imageLeading
             }
-            button.font = titleFont
+            button.font = StatusTitle.valueFont
             button.toolTip = "系统状态"
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        applyStatusItemLength(forPreviewTitle: longestTitleSample())
+        applyStatusItemLength(forPreview: longestTitleSample())
     }
 
     private func buildPanel() {
         panel = MonitorPanelController()
         _ = panel.view
-        panel.onSortChanged = { [weak self] in self?.updateMetrics() }
+        // Sort / expand only re-render cached samples; resampling here would compute CPU
+        // deltas over a few ms and make the numbers jump.
+        panel.onSortChanged = { [weak self] in self?.renderPanel() }
         panel.onOpenActivity = { [weak self] in self?.openActivityMonitor() }
         panel.onMoreMenu = { [weak self] btn in self?.showMoreMenu(from: btn) }
         popover = NSPopover()
         popover.contentSize = NSSize(width: HIG.panelW, height: HIG.panelH)
+        // Panel fits its height to the content (expand / row count); follow it
+        panel.onPreferredSizeChange = { [weak self] size in self?.popover.contentSize = size }
         popover.behavior = .transient
         popover.animates = true
         // System popover chrome only — no custom corner/border/shadow on content
@@ -792,8 +211,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if popover.isShown { popover.performClose(nil) }
         else {
             NSApp.activate(ignoringOtherApps: true)
+            // Size to content before showing so the popover doesn't jump on open (UI only)
+            panel.resetForOpen()
+            panel.fitToContentIfNeeded()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            isPanelOpen = true; applyThrottle(); updateMetrics()
+            // popoverWillShow already set isPanelOpen + throttle
+            updateMetrics()
         }
     }
     private func installClickOutsideMonitor() {
@@ -862,13 +285,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let raw = sender.representedObject as? String, let key = StatusShowKey(rawValue: raw) else { return }
         var order = statusOrder(); guard let i = order.firstIndex(of: key), i > 0 else { return }
         order.swapAt(i, i-1); saveOrder(order); rebuildOrderMenu()
-        applyStatusItemLength(forPreviewTitle: longestTitleSample()); updateMetrics()
+        statusPrefsChanged()
     }
     @objc private func moveOrderDown(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let key = StatusShowKey(rawValue: raw) else { return }
         var order = statusOrder(); guard let i = order.firstIndex(of: key), i < order.count-1 else { return }
         order.swapAt(i, i+1); saveOrder(order); rebuildOrderMenu()
-        applyStatusItemLength(forPreviewTitle: longestTitleSample()); updateMetrics()
+        statusPrefsChanged()
     }
     @objc private func toggleShow(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let key = StatusShowKey(rawValue: raw) else { return }
@@ -879,7 +302,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         prefs.set(!on, forKey: prefsPrefix + key.rawValue)
         sender.state = !on ? .on : .off
-        applyStatusItemLength(forPreviewTitle: longestTitleSample()); updateMetrics()
+        if !on && key == .disk { snapshot.disk = diskInfo(maxAge: 0) }  // disk isn't sampled while hidden
+        statusPrefsChanged()
+        if !on && [StatusShowKey.chip, .gpu, .fan].contains(key) { refreshTempsAsync(force: true) }
+    }
+    private func statusPrefsChanged() {
+        visibleKeysCache = nil
+        applyStatusItemLength(forPreview: longestTitleSample())
+        renderStatusTitle()
     }
     @objc private func quit() { popover?.performClose(nil); NSApp.terminate(nil) }
     private func installLifecycleObservers() {
@@ -892,7 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func onWillSleep() { isSleeping = true; applyThrottle() }
     @objc private func onDidWake() {
-        isSleeping = false; lastNetBytes = nil; lastCPUTicks = nil
+        isSleeping = false; lastNetWall = nil; lastIfBytes.removeAll(); lastCPUTicks = nil
         applyThrottle(); refreshTempsAsync(force: true); updateMetrics()
     }
     @objc private func onScreenLocked() { isScreenLocked = true; applyThrottle() }
@@ -908,182 +338,249 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else { timer?.invalidate(); timer = nil }
     }
     private func restartTimer(interval: TimeInterval) {
+        // Idempotent: open/willShow/unlock may all ask for the same interval
+        if let t = timer, t.isValid, t.timeInterval == interval { return }
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.updateMetrics() }
-        if let t = timer { RunLoop.main.add(t, forMode: .common) }
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.updateMetrics() }
+        t.tolerance = interval * 0.1  // let the system coalesce wakeups
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
-    private func longestTitleSample() -> String {
-        var parts: [String] = []
-        for key in statusOrder() where isShow(key) {
+    /// Menubar keys in user order; cached because UserDefaults is read on every tick otherwise.
+    private func visibleStatusKeys() -> [StatusShowKey] {
+        if let k = visibleKeysCache { return k }
+        let k = statusOrder().filter { isShow($0) }
+        visibleKeysCache = k
+        return k
+    }
+    private var isPanelVisible: Bool { isPanelOpen || popover?.isShown == true }
+    /// Widest plausible title for the current key set, so the item never resizes per tick.
+    private func longestTitleSample() -> [StatusSegment] {
+        visibleStatusKeys().map { key -> StatusSegment in
             switch key {
-            case .cpu: parts.append("CPU 100%")
-            case .gpu: parts.append("GPU 100%")
-            case .mem: parts.append("内存 100%")
-            case .chip: parts.append("温度 999 °C")  // reserve 3-digit temp
-            case .fan: parts.append("扇 9999 RPM")
-            case .disk: parts.append("盘 100%")
-            case .net: parts.append("↓999.9 MB/s ↑999.9 MB/s")  // reserve peak rate width
+            case .cpu: return .metric(label: "CPU", value: "100%", level: .normal)
+            case .gpu: return .metric(label: "GPU", value: "100%", level: .normal)
+            case .mem: return .metric(label: "内存", value: "100%", level: .normal)
+            case .chip: return .metric(label: "温度", value: "105\u{2009}°C", level: .normal)  // reserve 3-digit temp
+            case .fan: return .metric(label: "风扇", value: "9999 RPM", level: .normal)
+            case .disk: return .metric(label: "磁盘", value: "100%", level: .normal)
+            case .net: return .rates(down: formatRateShort(999.9 * 1024 * 1024), up: formatRateShort(999.9 * 1024 * 1024))
             }
         }
-        if parts.isEmpty { parts.append("—") }
-        return " " + parts.joined(separator: " · ")
     }
-    private func applyStatusItemLength(forPreviewTitle sample: String) {
-        let textWidth = (sample as NSString).size(withAttributes: [.font: titleFont]).width
-        statusItem.length = ceil(textWidth + 16 + 6)
+    private func applyStatusItemLength(forPreview sample: [StatusSegment]) {
+        let iconW: CGFloat = 16
+        statusItem.length = ceil(StatusTitle.width(sample) + iconW + 8)
     }
-    private func buildTitle(cpuI: Int, gpuI: Int?, memI: Int, chipStr: String, fanRpm: Int?, diskI: Int, down: String, up: String) -> String {
-        var parts: [String] = []
-        for key in statusOrder() where isShow(key) {
+    /// Values are padded to 2 digits (figure spaces, see StatusTitle) so typical readings don't
+    /// shift the row; warn/critical levels mirror the panel's bar thresholds.
+    private func buildTitle(cpu: Double, gpu: Double?, mem: Double, chipC: Double?, fanRpm: Int?, disk: Double, down: String, up: String) -> [StatusSegment] {
+        func pct(_ v: Double) -> String { String(format: "%2d%%", Self.clampPct(v)) }
+        return visibleStatusKeys().map { key -> StatusSegment in
             switch key {
-            case .cpu: parts.append(String(format: "CPU %3d%%", cpuI))
-            case .gpu: parts.append(gpuI.map { String(format: "GPU %3d%%", $0) } ?? "GPU  --")
-            case .mem: parts.append(String(format: "内存 %3d%%", memI))
-            case .chip: parts.append("温度 \(chipStr)")
-            case .fan: parts.append(fanRpm.map { String(format: "扇 %4d RPM", min(9999,$0)) } ?? "扇  --")
-            case .disk: parts.append(String(format: "盘 %3d%%", diskI))
-            case .net: parts.append("↓\(down) ↑\(up)")
+            case .cpu:
+                return .metric(label: "CPU", value: pct(cpu), level: .of(cpu, warn: 75, critical: 90))
+            case .gpu:
+                guard let g = gpu else { return .metric(label: "GPU", value: "--", level: .normal) }
+                return .metric(label: "GPU", value: pct(g), level: .of(g, warn: 75, critical: 90))
+            case .mem:
+                return .metric(label: "内存", value: pct(mem), level: .of(mem, warn: 85, critical: 95))
+            case .chip:
+                guard let c = chipC else { return .metric(label: "温度", value: "--\u{2009}°C", level: .normal) }
+                let v = min(999, max(0, Int(c.rounded())))
+                return .metric(label: "温度", value: String(format: "%2d\u{2009}°C", v), level: .of(Double(v), warn: 85, critical: 95))
+            case .fan:
+                return .metric(label: "风扇", value: fanRpm.map { String(format: "%4d RPM", min(9999, $0)) } ?? "--", level: .normal)
+            case .disk:
+                return .metric(label: "磁盘", value: pct(disk), level: .of(disk, warn: 80, critical: 92))
+            case .net:
+                return .rates(down: down, up: up)
             }
         }
-        return parts.isEmpty ? " —" : " " + parts.joined(separator: " · ")
     }
 
+    // MARK: - Sample → render pipeline
+    private struct Snapshot {
+        var cpu: Double = 0
+        var mem = MemInfo(total: 0, used: 0, app: 0, wired: 0, compressed: 0, cached: 0, usedPercent: 0)
+        var disk = DiskInfo(total: 0, used: 0, usedPercent: 0)
+        var thermal = ThermalInfo(chipC: nil, cpuC: nil, gpuC: nil, fanRpm: nil, pressureLabel: "")
+        var gpuPct: Double?
+        var pe: (p: Double, e: Double, s: Double) = (0, 0, 0)
+        var procs: [AggProc] = []   // only refreshed while the panel is visible
+    }
+    private static func clampPct(_ v: Double) -> Int { min(100, max(0, Int(v.rounded()))) }
+
+    /// Timer tick: sample what the menubar needs; panel-only work (process table,
+    /// disk when hidden from menubar) runs only while the popover is visible.
     private func updateMetrics() {
         if isSleeping || isScreenLocked { return }
-        let cpu = sampleCPU()
-        let mem = sampleMemory()
-        let disk = sampleDisk()
-        let thermal = sampleThermal()
-        _ = sampleNetwork()
-        let swap = sampleSwap()
+        let panelVisible = isPanelVisible
+        let keys = visibleStatusKeys()
+        snapshot.cpu = sampleCPU()
+        snapshot.mem = sampleMemory()
+        if panelVisible || keys.contains(.disk) { snapshot.disk = diskInfo(maxAge: diskMaxAge) }
+        snapshot.thermal = sampleThermal()
+        sampleNetwork()
         tempLock.lock()
-        let gpuPct = cachedGpuPct
-        let pe = cachedPE
+        snapshot.gpuPct = cachedGpuPct
+        snapshot.pe = cachedPE
         tempLock.unlock()
-        let procs = aggregateByApp(sampleProcessesRaw())
-        let sorted: [AggProc] = panel.sortByCPU
-            ? procs.sorted { $0.cpuPercent > $1.cpuPercent }
-            : procs.sorted { $0.footprint > $1.footprint }
-        let top = Array(sorted.prefix(panel.topRows.count))
-        let cpuI = min(100, max(0, Int(cpu.rounded())))
-        let memI = min(100, max(0, Int(mem.usedPercent.rounded())))
-        let diskI = min(100, max(0, Int(disk.usedPercent.rounded())))
-        let gpuI = gpuPct.map { min(100, max(0, Int($0.rounded()))) }
-        let chipStr: String
-        if let c = thermal.chipC {
-            // "31 °C" with space; pad to 3 digits width for stable menubar length
-            chipStr = String(format: "%3d °C", min(999, max(0, Int(c.rounded()))))
-        } else { chipStr = " -- °C" }
-        statusItem.button?.title = buildTitle(
-            cpuI: cpuI, gpuI: gpuI, memI: memI, chipStr: chipStr,
-            fanRpm: thermal.fanRpm, diskI: diskI,
+        if panelVisible { sampleProcessTable() }
+        renderStatusTitle()
+        refreshTempsAsync(force: false)
+        if panelVisible { renderPanel() }
+    }
+
+    private func sampleProcessTable() {
+        let wall = ProcessInfo.processInfo.systemUptime
+        let dt = wall - lastProcSampleWall
+        if dt < 0.5 { return }  // e.g. open right after a tick — delta would be noise
+        snapshot.procs = aggregateByApp(sampleProcessesRaw())
+        // Baseline is stale (panel was closed / first open): values are averaged over the
+        // gap, so take a quick follow-up sample instead of waiting a full tick.
+        if dt > 3 && !procWarmupPending {
+            procWarmupPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self = self else { return }
+                self.procWarmupPending = false
+                if self.isPanelVisible { self.updateMetrics() }
+            }
+        }
+    }
+
+    private func renderStatusTitle() {
+        let s = snapshot
+        let segments = buildTitle(
+            cpu: s.cpu, gpu: s.gpuPct, mem: s.mem.usedPercent, chipC: s.thermal.chipC,
+            fanRpm: s.thermal.fanRpm, disk: s.disk.usedPercent,
             down: formatRateShort(netDownBps), up: formatRateShort(netUpBps)
         )
-        refreshTempsAsync(force: false)
-        guard isPanelOpen || popover?.isShown == true else { return }
+        // Re-assigning an identical title still relayouts/redraws the status item
+        let key = StatusTitle.key(segments)
+        if key != lastStatusTitle {
+            lastStatusTitle = key
+            statusItem.button?.attributedTitle = StatusTitle.attributed(segments)
+        }
+    }
+
+    /// Pure render from `snapshot`; safe to call for UI-only changes (sort, expand).
+    private func renderPanel() {
+        guard isPanelVisible, let panel = panel else { return }
+        let s = snapshot
+        let thermal = s.thermal
+        let cpuI = Self.clampPct(s.cpu)
+        let memI = Self.clampPct(s.mem.usedPercent)
+        let diskI = Self.clampPct(s.disk.usedPercent)
+        let gpuI = s.gpuPct.map(Self.clampPct)
 
         let uptime = formatUptime(ProcessInfo.processInfo.systemUptime)
-        panel.subtitleLabel.stringValue = "\(chipName) · \(memTotalGB) · 已运行 \(uptime)"
-        panel.thermalBadge.stringValue = thermal.pressureLabel
-        panel.thermalBadge.textColor = .labelColor
-        let dotColor: NSColor
+        panel.subtitleLabel.setText("\(chipName) · \(memTotalGB) · 已运行 \(uptime)")
+        let pillColor: NSColor
         switch ProcessInfo.processInfo.thermalState {
-        case .nominal: dotColor = .systemGreen
-        case .fair: dotColor = .systemYellow
-        case .serious, .critical: dotColor = .systemOrange
-        @unknown default: dotColor = .tertiaryLabelColor
+        case .nominal: pillColor = .systemGreen
+        case .fair: pillColor = .systemYellow
+        case .serious: pillColor = .systemOrange
+        case .critical: pillColor = .systemRed
+        @unknown default: pillColor = .tertiaryLabelColor
         }
-        panel.thermalDot.layer?.backgroundColor = dotColor.cgColor
-        panel.thermalDot.isHidden = thermal.pressureLabel.isEmpty
+        panel.setThermal(thermal.pressureLabel, color: pillColor)
 
-        panel.cpuRow.valueLabel.stringValue = String(format: "%d%%", cpuI)
-        panel.cpuRow.valueLabel.textColor = .labelColor
+        panel.cpuRow.setReading("\(cpuI)", level: .of(Double(cpuI), warn: 75, critical: 90))
         panel.cpuRow.track.set(Double(cpuI))
-        var loads = [Double](repeating: 0, count: 3)
-        _ = loads.withUnsafeMutableBufferPointer { getloadavg($0.baseAddress, 3) }
-        let cpuShort = String(format: "用户 %.0f%% · 系统 %.0f%%", lastCPUUserSys.user, lastCPUUserSys.system)
-        let cpuLong = String(
-            format: "用户 %.0f%% · 系统 %.0f%% · 负载 %.2f · P %.0f%% · E %.0f%%",
-            lastCPUUserSys.user, lastCPUUserSys.system, loads[0], pe.p * 100, pe.e * 100
-        )
-        panel.cpuRow.detailLabel.stringValue = panel.cpuRow.detailExpanded ? cpuLong : cpuShort
+        // Only format the variant that is actually shown
+        if panel.cpuRow.detailExpanded {
+            var loads = [Double](repeating: 0, count: 3)
+            _ = loads.withUnsafeMutableBufferPointer { getloadavg($0.baseAddress, 3) }
+            panel.cpuRow.setDetail(String(
+                format: "用户 %.0f%% · 系统 %.0f%% · 负载 %.2f · P 核 %.0f%% · E 核 %.0f%%",
+                lastCPUUserSys.user, lastCPUUserSys.system, loads[0], s.pe.p * 100, s.pe.e * 100
+            ))
+        } else {
+            panel.cpuRow.setDetail(String(format: "用户 %.0f%% · 系统 %.0f%%", lastCPUUserSys.user, lastCPUUserSys.system))
+        }
 
-        let usedGB = Double(mem.used) / 1_073_741_824.0
-        let totalGBNum = Double(mem.total) / 1_073_741_824.0
-        let totalGBStr = totalGBNum >= 100 ? String(format: "%.0f GB", totalGBNum) : String(format: "%.0f GB", totalGBNum)
-        // Main value: percent only; capacity + pressure on the line below
-        panel.memRow.valueLabel.stringValue = String(format: "%d%%", memI)
-        panel.memRow.valueLabel.textColor = .labelColor
+        let mem = s.mem
+        // Main value: percent only; capacity + pressure (or the colored legend) below
+        panel.memRow.setReading("\(memI)", level: .of(Double(memI), warn: 85, critical: 95))
         panel.memRow.usesSegments = panel.memRow.detailExpanded
         if panel.memRow.detailExpanded {
             panel.memRow.segments.set(parts: [
-                (Double(mem.app), NSColor.systemBlue),
-                (Double(mem.wired), NSColor.systemPurple),
-                (Double(mem.compressed), NSColor.systemOrange)
+                (Double(mem.app), HIG.memApp),
+                (Double(mem.wired), HIG.memWired),
+                (Double(mem.compressed), HIG.memCompressed)
             ], total: Double(mem.total))
+            let app = formatBytes(mem.app), wired = formatBytes(mem.wired)
+            let comp = formatBytes(mem.compressed), swap = formatBytes(sampleSwap())
+            // Legend dots match the segment colors
+            panel.memRow.detailLabel.set(key: "\(app)|\(wired)|\(comp)|\(swap)") {
+                Caption().dot(HIG.memApp).text("应用 ").value(app).gap()
+                    .dot(HIG.memWired).text("联动 ").value(wired).gap()
+                    .dot(HIG.memCompressed).text("压缩 ").value(comp).gap()
+                    .text("交换 ").value(swap).string
+            }
         } else {
-            panel.memRow.track.set(Double(memI))
+            panel.memRow.track.set(Double(memI), warnAt: 85, criticalAt: 95)
+            let pressure: String
+            if memI < 70 { pressure = "正常" }
+            else if memI < 85 { pressure = "偏高" }
+            else { pressure = "紧张" }
+            let usedGB = Double(mem.used) / 1_073_741_824.0
+            panel.memRow.setDetail(String(format: "%.1f / %@ · 内存压力%@", usedGB, memTotalGB, pressure))
         }
-        let pressure: String
-        if memI < 70 { pressure = "正常" }
-        else if memI < 85 { pressure = "偏高" }
-        else { pressure = "紧张" }
-        let memShort = String(format: "%.1f / %@ · 内存压力%@", usedGB, totalGBStr, pressure)
-        let memLong = String(
-            format: "应用 %@ · 联动 %@ · 压缩 %@ · 交换 %@",
-            formatBytes(mem.app), formatBytes(mem.wired), formatBytes(mem.compressed), formatBytes(swap)
-        )
-        panel.memRow.detailLabel.stringValue = panel.memRow.detailExpanded ? memLong : memShort
 
+        // GPU gets a caption too (temperature from macmon), so it has the same rhythm as CPU / 内存
         if let g = gpuI {
-            panel.gpuRow.valueLabel.stringValue = String(format: "%d%%", g)
+            panel.gpuRow.setReading("\(g)", level: .of(Double(g), warn: 75, critical: 90))
             panel.gpuRow.track.set(Double(g))
         } else {
-            panel.gpuRow.valueLabel.stringValue = "未支持"
+            panel.gpuRow.setPlaceholder("未支持")
             panel.gpuRow.track.set(0)
         }
-        panel.gpuRow.valueLabel.textColor = .labelColor
+        if let gc = thermal.gpuC {
+            panel.gpuRow.setDetail(String(format: "GPU 温度 %.0f °C", gc))
+        } else {
+            panel.gpuRow.setDetail(gpuI == nil ? "需要 macmon 提供 GPU 数据" : "GPU 温度 读取中…")
+        }
 
         // Prefer CPU sensor for "CPU 温度"; fall back to chip
         if let c = thermal.cpuC ?? thermal.chipC {
-            panel.tempCell.setValue(String(format: "%.0f", c), unit: "°C")
+            panel.tempCell.setReading(String(format: "%.0f", c), unit: "°C", level: .of(c, warn: 85, critical: 95))
         } else {
-            panel.tempCell.setValue("读取中…", unit: "")
+            panel.tempCell.setPlaceholder("读取中…")
         }
         if let rpm = thermal.fanRpm {
-            panel.fanCell.setValue("\(rpm)", unit: "RPM")
+            panel.fanCell.setReading("\(rpm)", unit: "RPM")
         } else {
-            panel.fanCell.setValue("无读数", unit: "")
+            panel.fanCell.setPlaceholder("无读数")
         }
 
-        if disk.total == 0 {
-            panel.diskRow.valueLabel.stringValue = "读取失败"
+        if s.disk.total == 0 {
+            panel.diskRow.setMessage("读取失败")
             panel.diskRow.track.set(0)
         } else {
-            panel.diskRow.valueLabel.stringValue = String(
-                format: "%d%% · %@ / %@",
-                diskI, formatBytes(disk.used), formatBytes(disk.total)
-            )
+            panel.diskRow.setUsage(percent: diskI, detail: "\(formatBytes(s.disk.used)) / \(formatBytes(s.disk.total))")
             panel.diskRow.track.set(Double(diskI), warnAt: 80, criticalAt: 92)
         }
-        panel.netRow.valueLabel.stringValue = "↓\(formatRate(netDownBps))  ↑\(formatRate(netUpBps))"
+        panel.netRow.setRates(down: formatRate(netDownBps), up: formatRate(netUpBps))
 
-        for (i, row) in panel.topRows.enumerated() {
-            if i < top.count {
-                let p = top[i]
-                row.nameLabel.stringValue = p.name
-                row.cpuLabel.stringValue = String(format: "%.1f%%", p.cpuPercent)
-                row.memLabel.stringValue = formatBytes(p.footprint)
-                row.pid = p.mainPid
-                row.isHidden = false
-                row.setIcon(iconFor(appKey: p.appKey))
-                row.onMenu = { [weak self] in self?.confirmKill(pid: p.mainPid, name: p.name) }
-            } else {
-                row.isHidden = true
-                row.pid = 0
-                row.onMenu = nil
-            }
+        let n = panel.topRows.count
+        let top: [AggProc] = panel.sortByCPU
+            ? Array(s.procs.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(n))
+            : Array(s.procs.sorted { $0.footprint > $1.footprint }.prefix(n))
+        panel.showProcRows(top.count)
+        for (i, p) in top.enumerated() {
+            let row = panel.topRows[i]
+            row.nameLabel.setText(p.name)
+            row.cpuLabel.setText(String(format: "%.1f%%", p.cpuPercent))
+            row.memLabel.setText(formatBytes(p.footprint))
+            row.setSortedByCPU(panel.sortByCPU)
+            row.pid = p.mainPid
+            row.setIcon(iconFor(appKey: p.appKey), key: p.appKey)
+            let pid = p.mainPid, name = p.name, key = p.appKey
+            row.onMenu = { [weak self] in self?.confirmKill(pid: pid, name: name, appKey: key) }
         }
+        panel.fitToContentIfNeeded()
     }
 
     private func iconFor(appKey: String) -> NSImage? {
@@ -1109,16 +606,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if h > 0 { return "\(h)时\(m)分" }
         return "\(m)分"
     }
-    private func confirmKill(pid: Int32, name: String) {
+    private func confirmKill(pid: Int32, name: String, appKey: String) {
         let alert = NSAlert()
         alert.messageText = "结束进程？"
         alert.informativeText = "\(name) (pid \(pid))"; alert.alertStyle = .warning
         alert.addButton(withTitle: "结束"); alert.addButton(withTitle: "取消")
-        if alert.runModal() == .alertFirstButtonReturn { kill(pid, SIGTERM) }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // The alert can stay up indefinitely: make sure the pid wasn't recycled meanwhile
+        guard friendlyNameAndKey(for: pid).1 == appKey else { NSSound.beep(); return }
+        kill(pid, SIGTERM)
     }
 
     private struct ThermalInfo {
-        var chipC: Double?; var chipSensor: String?
+        var chipC: Double?
         var cpuC: Double?; var gpuC: Double?; var fanRpm: Int?; var pressureLabel: String
     }
     private func sampleThermal() -> ThermalInfo {
@@ -1132,31 +632,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }()
         tempLock.lock(); let cpu = cachedCpuC; let gpu = cachedGpuC; let fan = cachedFanRpm; tempLock.unlock()
-        var chip: Double? = nil; var sensor: String? = nil
-        switch (cpu, gpu) {
-        case let (c?, g?): if g >= c { chip = g; sensor = "GPU" } else { chip = c; sensor = "CPU" }
-        case let (c?, nil): chip = c; sensor = "CPU"
-        case let (nil, g?): chip = g; sensor = "GPU"
-        default: break
-        }
-        return ThermalInfo(chipC: chip, chipSensor: sensor, cpuC: cpu, gpuC: gpu, fanRpm: fan, pressureLabel: pressure)
+        // Hotter of CPU / GPU sensors
+        let chip: Double? = [cpu, gpu].compactMap { $0 }.max()
+        return ThermalInfo(chipC: chip, cpuC: cpu, gpuC: gpu, fanRpm: fan, pressureLabel: pressure)
     }
 
+    /// Resolve macmon once: README promises "macmon in PATH", but LaunchAgents get a minimal
+    /// PATH, so probe the usual install locations explicitly too.
+    private func resolveMacmonPath() -> String? {
+        if let p = macmonPath { return p }
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - macmonProbeWall < 60 { return nil }
+        macmonProbeWall = now
+        var candidates = ["/opt/homebrew/bin/macmon", "/usr/local/bin/macmon",
+                          NSHomeDirectory() + "/.cargo/bin/macmon", "/opt/local/bin/macmon"]
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            candidates += path.split(separator: ":").map { String($0) + "/macmon" }
+        }
+        macmonPath = candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        return macmonPath
+    }
+
+    /// macmon is a subprocess spawn + ~200 ms sample, by far the most expensive source.
+    /// Skip it when nothing visible needs it, and space it out while the panel is closed.
     private func refreshTempsAsync(force: Bool) {
-        tempLock.lock(); let busy = tempRefreshInFlight
-        if busy && !force { tempLock.unlock(); return }
+        let panelVisible = isPanelVisible
+        let now = ProcessInfo.processInfo.systemUptime
+        if !force {
+            if !panelVisible && !visibleStatusKeys().contains(where: { [StatusShowKey.chip, .gpu, .fan].contains($0) }) { return }
+            // 0.5 s slack so timer tolerance doesn't push a 2.5 s tick cadence to every 3rd tick
+            if !panelVisible && now - lastMacmonLaunchWall < macmonIdleMinInterval - 0.5 { return }
+        }
+        guard let path = resolveMacmonPath() else { return }
+        tempLock.lock()
+        // `force` bypasses the time throttle only — never run two macmon instances at once
+        if tempRefreshInFlight { tempLock.unlock(); return }
         tempRefreshInFlight = true; tempLock.unlock()
+        lastMacmonLaunchWall = now
+        let timeout = macmonTimeout
         DispatchQueue.global(qos: .utility).async { [weak self] in
             defer { self?.tempLock.lock(); self?.tempRefreshInFlight = false; self?.tempLock.unlock() }
             guard let self = self else { return }
             let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: self.macmonPath)
+            proc.executableURL = URL(fileURLWithPath: path)
             proc.arguments = ["pipe", "-s", "1", "-i", "200"]
-            let outPipe = Pipe(); let errPipe = Pipe()
-            proc.standardOutput = outPipe; proc.standardError = errPipe
+            let outPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = FileHandle.nullDevice  // was an unread Pipe
             do { try proc.run() } catch { return }
-            proc.waitUntilExit()
+            // A hung macmon used to leave tempRefreshInFlight set forever (temps frozen)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                if proc.isRunning { proc.terminate() }
+            }
+            // Drain stdout before waiting so a large write can't block on a full pipe
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
             guard proc.terminationStatus == 0,
                   let text = String(data: data, encoding: .utf8),
                   let line = text.split(whereSeparator: \.isNewline).first,
@@ -1168,20 +698,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let v = temp["cpu_temp_avg"] as? Double, v.isFinite, v > 0, v < 150 { cpu = v }
                 if let v = temp["gpu_temp_avg"] as? Double, v.isFinite, v > 0, v < 150 { gpu = v }
             }
-            var fanRpm: Int? = nil; var fanMax: Int? = nil; var fanCount = 0
+            var fanRpm: Int? = nil
             if let fans = obj["fans"] as? [[String: Any]] {
-                fanCount = fans.count; var best = 0; var bestMax = 0
+                var best = 0
                 for f in fans {
                     let rpm: Int
                     if let r = f["rpm"] as? Int { rpm = r }
-                    else if let r = f["rpm"] as? Double { rpm = Int(r.rounded()) }
+                    else if let r = f["rpm"] as? Double, r.isFinite { rpm = Int(r.rounded()) }
                     else { continue }
                     if rpm > best { best = rpm }
-                    if let m = f["max_rpm"] as? Int { bestMax = max(bestMax, m) }
-                    else if let m = f["max_rpm"] as? Double { bestMax = max(bestMax, Int(m.rounded())) }
                 }
                 if best > 0 { fanRpm = best }
-                if bestMax > 0 { fanMax = bestMax }
             }
             var gpuPct: Double? = nil
             if let r = obj["gpu_active_ratio"] as? Double, r.isFinite { gpuPct = min(100, max(0, r * 100.0)) }
@@ -1199,43 +726,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.tempLock.lock()
             self.cachedCpuC = cpu; self.cachedGpuC = gpu; self.cachedFanRpm = fanRpm
-            self.cachedFanMax = fanMax; self.cachedFanCount = fanCount; self.cachedGpuPct = gpuPct
+            self.cachedGpuPct = gpuPct
             self.cachedPE = (pRatio, eRatio, sRatio)
             self.tempLock.unlock()
         }
     }
 
-    private func sampleNetwork() -> (down: Double, up: Double) {
+    /// Delta of a 32-bit counter: wrap if it was near the top, otherwise treat a decrease
+    /// as a reset (interface re-created, e.g. VPN utun) rather than a ~4 GiB burst.
+    private static func counterDelta(_ cur: UInt32, _ prev: UInt32) -> UInt64 {
+        if cur >= prev { return UInt64(cur - prev) }
+        return prev >= 0xC000_0000 ? UInt64(cur &- prev) : 0
+    }
+    private func sampleNetwork() {
+        let wall = ProcessInfo.processInfo.systemUptime
+        let dt = lastNetWall.map { wall - $0 } ?? 0
+        if lastNetWall != nil && dt <= 0.2 { return }  // too short for a meaningful rate
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return (netDownBps, netUpBps) }
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return }
         defer { freeifaddrs(ifaddr) }
-        var inB: UInt64 = 0; var outB: UInt64 = 0
+        var dIn: UInt64 = 0; var dOut: UInt64 = 0
+        var next: [String: (inB: UInt32, outB: UInt32)] = [:]
+        next.reserveCapacity(lastIfBytes.count)
         var ptr: UnsafeMutablePointer<ifaddrs>? = first
         while let p = ptr {
             let flags = Int32(p.pointee.ifa_flags)
             let isUp = (flags & IFF_UP) != 0
             let isLoop = (flags & IFF_LOOPBACK) != 0
-            if isUp && !isLoop, let addr = p.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_LINK) {
-                if let data = p.pointee.ifa_data {
-                    let ifd = data.assumingMemoryBound(to: if_data.self).pointee
-                    inB += UInt64(ifd.ifi_ibytes); outB += UInt64(ifd.ifi_obytes)
+            if isUp && !isLoop, let addr = p.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_LINK),
+               let data = p.pointee.ifa_data {
+                // if_data counters are 32-bit and wrap every 4 GiB: track per interface
+                // (summing first made any single wrap read as 0 B/s).
+                let ifd = data.assumingMemoryBound(to: if_data.self).pointee
+                let name = String(cString: p.pointee.ifa_name)
+                let cur = (inB: ifd.ifi_ibytes, outB: ifd.ifi_obytes)
+                if let prev = lastIfBytes[name] {
+                    dIn += Self.counterDelta(cur.inB, prev.inB); dOut += Self.counterDelta(cur.outB, prev.outB)
                 }
+                next[name] = cur
             }
             ptr = p.pointee.ifa_next
         }
-        netLifetime = (inB, outB)
-        if netSessionStart == nil { netSessionStart = (inB, outB) }
-        let wall = ProcessInfo.processInfo.systemUptime
-        if let last = lastNetBytes {
-            let dt = wall - last.wall
-            if dt > 0.2 {
-                let dIn = inB >= last.inB ? inB - last.inB : 0
-                let dOut = outB >= last.outB ? outB - last.outB : 0
-                netDownBps = Double(dIn) / dt; netUpBps = Double(dOut) / dt
-            }
+        if lastNetWall != nil, dt > 0 {
+            netDownBps = Double(dIn) / dt; netUpBps = Double(dOut) / dt
         }
-        lastNetBytes = (inB, outB, wall)
-        return (netDownBps, netUpBps)
+        lastIfBytes = next
+        lastNetWall = wall
     }
     private func formatRate(_ bps: Double) -> String {
         if bps < 1024 { return String(format: "%.0f B/s", bps) }
@@ -1251,45 +787,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(format: "%5.2f GB/s", bps/(1024*1024*1024))
     }
     private func sampleCPU() -> Double {
+        let wall = ProcessInfo.processInfo.systemUptime
+        // Called again within a few ms (panel open right after a tick): delta would be noise
+        if lastCPUTicks != nil && wall - lastCPUWall < 0.5 { return lastCPUValue }
         var numCPUs: natural_t = 0
         var cpuInfo: processor_info_array_t?
         var numCpuInfo: mach_msg_type_number_t = 0
-        let result = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &numCPUs, &cpuInfo, &numCpuInfo)
-        guard result == KERN_SUCCESS, let cpuInfo = cpuInfo else { return 0 }
+        let result = host_processor_info(hostPort, PROCESSOR_CPU_LOAD_INFO, &numCPUs, &cpuInfo, &numCpuInfo)
+        guard result == KERN_SUCCESS, let cpuInfo = cpuInfo else { return lastCPUValue }
         defer {
             let size = vm_size_t(numCpuInfo) * vm_size_t(MemoryLayout<integer_t>.stride)
             vm_deallocate(mach_task_self_, vm_address_t(bitPattern: cpuInfo), size)
         }
+        // Ticks are 32-bit signed per core; UInt64(Int32) traps once a counter goes negative
+        // (long uptimes), so reinterpret as unsigned.
+        @inline(__always) func tick(_ i: Int) -> UInt64 { UInt64(UInt32(bitPattern: cpuInfo[i])) }
         var user: UInt64 = 0, system: UInt64 = 0, idle: UInt64 = 0, nice: UInt64 = 0
         for i in 0..<Int(numCPUs) {
             let offset = Int(CPU_STATE_MAX) * i
-            user += UInt64(cpuInfo[offset + Int(CPU_STATE_USER)])
-            system += UInt64(cpuInfo[offset + Int(CPU_STATE_SYSTEM)])
-            idle += UInt64(cpuInfo[offset + Int(CPU_STATE_IDLE)])
-            nice += UInt64(cpuInfo[offset + Int(CPU_STATE_NICE)])
+            user += tick(offset + Int(CPU_STATE_USER))
+            system += tick(offset + Int(CPU_STATE_SYSTEM))
+            idle += tick(offset + Int(CPU_STATE_IDLE))
+            nice += tick(offset + Int(CPU_STATE_NICE))
         }
-        defer { lastCPUTicks = (user, system, idle, nice) }
-        guard let last = lastCPUTicks else { return 0 }
+        defer { lastCPUTicks = (user, system, idle, nice); lastCPUWall = wall }
+        guard let last = lastCPUTicks else { return lastCPUValue }
+        // A per-core counter wrapped: re-baseline instead of trapping on unsigned underflow
+        guard user >= last.user, system >= last.system, idle >= last.idle, nice >= last.nice else { return lastCPUValue }
         let total = (user - last.user) + (system - last.system) + (idle - last.idle) + (nice - last.nice)
-        guard total > 0 else { return 0 }
+        guard total > 0 else { return lastCPUValue }
         let u = Double((user - last.user) + (nice - last.nice)) / Double(total) * 100.0
         let s = Double(system - last.system) / Double(total) * 100.0
         lastCPUUserSys = (u, s)
-        return (u + s)
+        lastCPUValue = u + s
+        return lastCPUValue
     }
     private struct MemInfo { var total, used, app, wired, compressed, cached: UInt64; var usedPercent: Double }
     private func sampleMemory() -> MemInfo {
-        var totalSize: UInt64 = 0; var len = MemoryLayout<UInt64>.size
-        sysctlbyname("hw.memsize", &totalSize, &len, nil, 0)
+        // hw.memsize / page size are constant: read once in seedIdentity()
+        let totalSize = memTotalBytes
         var stats = vm_statistics64(); var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)
-        let host = mach_host_self()
+        let host = hostPort
         let kr = withUnsafeMutablePointer(to: &stats) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
                 host_statistics64(host, HOST_VM_INFO64, $0, &count)
             }
         }
-        var pageSize: vm_size_t = 0; host_page_size(host, &pageSize)
-        let page = UInt64(pageSize)
+        let page = memPageSize
         guard kr == KERN_SUCCESS else {
             return MemInfo(total: totalSize, used: 0, app: 0, wired: 0, compressed: 0, cached: 0, usedPercent: 0)
         }
@@ -1309,6 +853,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return r == 0 ? UInt64(xsw.xsu_used) : 0
     }
     private struct DiskInfo { var total, used: UInt64; var usedPercent: Double }
+    /// Volume capacity barely moves, and "important usage" capacity can be slow to query.
+    private func diskInfo(maxAge: TimeInterval) -> DiskInfo {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let c = diskCache, now - c.wall < maxAge { return c.info }
+        let info = sampleDisk()
+        diskCache = (info, now)
+        return info
+    }
     private func sampleDisk() -> DiskInfo {
         do {
             let vals = try URL(fileURLWithPath: "/").resourceValues(forKeys: [
@@ -1332,9 +884,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private func sampleProcessesRaw() -> [ProcRow] {
         let wall = ProcessInfo.processInfo.systemUptime
+        lastProcSampleWall = wall
         let pids = listAllPIDs()
         var rows: [ProcRow] = []; rows.reserveCapacity(256)
         var nextCPU: [Int32: (cpu: Double, wall: TimeInterval)] = [:]
+        nextCPU.reserveCapacity(pids.count)
         let selfPid = getpid()
         for pid in pids {
             if pid <= 0 || pid == selfPid { continue }
@@ -1381,22 +935,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return Array(pids.prefix(Int(filled) / MemoryLayout<Int32>.stride))
     }
     private func friendlyNameAndKey(for pid: Int32) -> (String, String) {
-        var pathBuf = [CChar](repeating: 0, count: 4 * 1024)
-        if proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count)) > 0 {
-            let path = String(cString: pathBuf)
+        // Hot path (every process, every panel tick): reuse one path buffer and memoize
+        // the path -> (name, appKey) parse instead of re-deriving it each time.
+        let pathLen = procPathBuf.withUnsafeMutableBufferPointer { proc_pidpath(pid, $0.baseAddress, UInt32($0.count)) }
+        if pathLen > 0 {
+            let path = String(cString: procPathBuf)
+            if let hit = procIdentityCache[path] { return (hit.name, hit.key) }
+            let ident: (name: String, key: String)
             if let range = path.range(of: ".app/") {
                 let appRoot = String(path[..<range.upperBound].dropLast())
                 let name = displayName(fromAppPath: path) ?? URL(fileURLWithPath: appRoot).deletingPathExtension().lastPathComponent
-                return (name, appRoot)
-            }
-            if path.hasSuffix(".app") {
+                ident = (name, appRoot)
+            } else if path.hasSuffix(".app") {
                 let name = displayName(fromAppPath: path) ?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
-                return (name, path)
+                ident = (name, path)
+            } else {
+                ident = (URL(fileURLWithPath: path).lastPathComponent, path)
             }
-            let base = URL(fileURLWithPath: path).lastPathComponent
-            if let cached = displayNameCache[path] { return (cached, path) }
-            displayNameCache[path] = base
-            return (base, path)
+            if procIdentityCache.count > 1000 { procIdentityCache.removeAll(keepingCapacity: true) }
+            procIdentityCache[path] = ident
+            return (ident.name, ident.key)
         }
         var nameBuf = [CChar](repeating: 0, count: 256)
         if proc_name(pid, &nameBuf, UInt32(nameBuf.count)) > 0 {
@@ -1422,8 +980,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if displayNameCache.count > 800 { displayNameCache.removeAll(keepingCapacity: true) }
         return name
     }
+    private static let byteUnits = ["B", "KB", "MB", "GB", "TB"]
     private func formatBytes(_ bytes: UInt64) -> String {
-        let units = ["B", "KB", "MB", "GB", "TB"]
+        let units = Self.byteUnits
         var value = Double(bytes); var idx = 0
         while value >= 1024 && idx < units.count - 1 { value /= 1024; idx += 1 }
         if idx == 0 { return String(format: "%.0f %@", value, units[idx]) }
@@ -1441,15 +1000,19 @@ extension AppDelegate: NSPopoverDelegate {
     func popoverWillShow(_ notification: Notification) {
         isPanelOpen = true
         // Default collapsed: percent + short captions; color mem breakdown only when expanded
-        panel.cpuRow.setExpanded(false)
-        panel.memRow.setExpanded(false)
-        panel.memRow.usesSegments = false
+        panel.resetForOpen()
         applyThrottle()
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)
-app.run()
+// Multi-file module: an explicit entry point replaces top-level code (built with -parse-as-library)
+@main
+enum HardwareStatusMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate  // NSApplication.delegate is weak
+        app.setActivationPolicy(.accessory)
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}
