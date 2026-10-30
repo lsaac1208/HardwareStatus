@@ -1,0 +1,9 @@
+.DS_Store
+*.app
+*.bak*
+*.o
+*.dylib
+build/
+DerivedData/
+*.png
+zest-ref/
