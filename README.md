@@ -13,6 +13,8 @@ macOS 菜单栏硬件状态面板：CPU、内存、GPU、温度、风扇、磁�
 
 ![面板](docs/panel.png)
 
+![面板（展开内存详情）](docs/panel-expanded.png)
+
 ![状态栏](docs/menubar.png)
 
 
