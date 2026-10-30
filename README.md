@@ -9,6 +9,13 @@ macOS 菜单栏硬件状态面板：CPU、内存、GPU、温度、风扇、磁�
 
 当前版本：**1.9.1**
 
+## 效果图
+
+![面板](docs/panel.png)
+
+![状态栏](docs/menubar.png)
+
+
 ## 要求
 
 - macOS（开发目标含较新系统 API；Apple Silicon 已实测）
