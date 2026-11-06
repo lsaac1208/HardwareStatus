@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cachedFanRpm: Int?
     private var cachedGpuPct: Double?
     private var cachedPE: (p: Double, e: Double, s: Double) = (0, 0, 0)
+    private var cachedTempWall: TimeInterval?  // uptime of the last macmon sample
     private var tempRefreshInFlight = false
     // Per-interface 32-bit if_data counters (see counterDelta)
     private var lastIfBytes: [String: (inB: UInt32, outB: UInt32)] = [:]
@@ -84,14 +85,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var chipName = "Apple Silicon"
     private var modelId = "Mac"
     private var memTotalGB = ""
+    private var fanBoost: FanBoostController!
+    private var fanStatusMenuItem: NSMenuItem!
+    private var fanBoostRoot: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        seedIdentity(); seedDefaultsIfNeeded(); buildPanel()
+        seedIdentity(); seedDefaultsIfNeeded(); startFanBoost(); buildPanel()
         buildPrefsMenu(); buildMoreMenu(); buildStatusItem()
         installLifecycleObservers(); installClickOutsideMonitor()
         // CPU/network need a baseline; process baseline is taken lazily when the panel opens
         _ = sampleCPU(); sampleNetwork()
         refreshTempsAsync(force: true); updateMetrics(); restartTimer(interval: idleInterval)
+    }
+
+    /// Quit path: fans must be back under system control before the process goes away.
+    func applicationWillTerminate(_ notification: Notification) {
+        fanBoost?.restoreNow()
+        hw_smc_close()
+    }
+
+    private func startFanBoost() {
+        fanBoost = FanBoostController()
+        fanBoost.onChange = { [weak self] in
+            guard let self = self else { return }
+            self.renderStatusTitle(); self.renderPanel()
+        }
+        fanBoost.start(onTerminateSignal: { NSApp.terminate(nil) })
     }
 
     private func seedIdentity() {
@@ -176,7 +195,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func buildMoreMenu() {
-        moreMenu = NSMenu(); moreMenu.autoenablesItems = false
+        moreMenu = NSMenu(); moreMenu.autoenablesItems = false; moreMenu.delegate = self
+        fanStatusMenuItem = NSMenuItem(title: "风扇：检测中…", action: nil, keyEquivalent: "")
+        fanStatusMenuItem.isEnabled = false; moreMenu.addItem(fanStatusMenuItem)
+        fanBoostRoot = NSMenuItem(title: "超温风扇加速", action: nil, keyEquivalent: "")
+        fanBoostRoot.submenu = NSMenu(); fanBoostRoot.submenu?.autoenablesItems = false
+        fanBoostRoot.isEnabled = true; moreMenu.addItem(fanBoostRoot)
+        moreMenu.addItem(.separator())
         let settings = NSMenuItem(title: "设置…", action: #selector(showPrefsFromMore(_:)), keyEquivalent: "")
         settings.target = self; settings.isEnabled = true; moreMenu.addItem(settings)
         let diag = NSMenuItem(title: "诊断：无守护进程 · 锁屏停采", action: nil, keyEquivalent: "")
@@ -320,14 +345,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dnc.addObserver(self, selector: #selector(onScreenLocked), name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
         dnc.addObserver(self, selector: #selector(onScreenUnlocked), name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
     }
-    @objc private func onWillSleep() { isSleeping = true; applyThrottle() }
+    // Sleep / lock: fans go back to automatic synchronously (Ftst is reset on wake anyway)
+    @objc private func onWillSleep() { isSleeping = true; syncFanBoostSuspension(); applyThrottle() }
     @objc private func onDidWake() {
         isSleeping = false; lastNetWall = nil; lastIfBytes.removeAll(); lastCPUTicks = nil
+        syncFanBoostSuspension()
         applyThrottle(); refreshTempsAsync(force: true); updateMetrics()
     }
-    @objc private func onScreenLocked() { isScreenLocked = true; applyThrottle() }
-    @objc private func onScreenUnlocked() { isScreenLocked = false; applyThrottle(); updateMetrics() }
-    func menuWillOpen(_ menu: NSMenu) {}
+    @objc private func onScreenLocked() { isScreenLocked = true; syncFanBoostSuspension(); applyThrottle() }
+    @objc private func onScreenUnlocked() {
+        isScreenLocked = false; syncFanBoostSuspension(); applyThrottle(); updateMetrics()
+    }
+    func menuWillOpen(_ menu: NSMenu) { if menu === moreMenu { rebuildFanBoostMenu() } }
+
+    // MARK: - 超温风扇加速 settings (更多 › 超温风扇加速)
+    private func rebuildFanBoostMenu() {
+        guard let fb = fanBoost, let menu = fanBoostRoot.submenu else { return }
+        fanStatusMenuItem.title = fb.detailStatus
+        menu.removeAllItems()
+        let status = NSMenuItem(title: fb.detailStatus, action: nil, keyEquivalent: "")
+        status.isEnabled = false; menu.addItem(status)
+        menu.addItem(.separator())
+        let toggle = NSMenuItem(title: "启用超温加速", action: #selector(toggleFanBoost(_:)), keyEquivalent: "")
+        toggle.target = self; toggle.state = fb.enabled ? .on : .off; toggle.isEnabled = true
+        menu.addItem(toggle)
+        func choices(_ title: String, _ values: [Double], current: Double, setting: String, _ label: (Double) -> String) {
+            let root = NSMenuItem(title: "\(title)：\(label(current))", action: nil, keyEquivalent: "")
+            let sub = NSMenu(); sub.autoenablesItems = false
+            for v in values {
+                let mi = NSMenuItem(title: label(v), action: #selector(setFanBoostSetting(_:)), keyEquivalent: "")
+                mi.target = self; mi.representedObject = [setting: v]; mi.isEnabled = true
+                mi.state = abs(v - current) < 0.01 ? .on : .off
+                sub.addItem(mi)
+            }
+            root.submenu = sub; root.isEnabled = fb.enabled; menu.addItem(root)
+        }
+        choices("触发温度", FanBoostController.thresholdChoices, current: fb.thresholdC, setting: "thresholdC") { "\(Int($0)) °C" }
+        choices("目标转速", FanBoostController.targetPercentChoices, current: fb.targetPercent, setting: "targetPercent") { "最大转速 \(Int($0))%" }
+        choices("回差", FanBoostController.hysteresisChoices, current: fb.hysteresisC, setting: "hysteresisC") { "\(Int($0)) °C" }
+        choices("持续超温", FanBoostController.sustainChoices, current: fb.sustainSec, setting: "sustainSec") { "\(Int($0)) 秒" }
+        menu.addItem(.separator())
+        for note in ["CPU 温度持续高于阈值才加速，降到阈值 − 回差后恢复自动",
+                     "退出 / 休眠 / 锁屏 / 关闭时恢复系统自动控制",
+                     "写入 SMC 需以 root 运行；芯片自身温控保护始终优先"] {
+            let mi = NSMenuItem(title: note, action: nil, keyEquivalent: ""); mi.isEnabled = false; menu.addItem(mi)
+        }
+    }
+    @objc private func toggleFanBoost(_ sender: NSMenuItem) {
+        fanBoost.setEnabled(!fanBoost.enabled)
+        if fanBoost.wantsTemperature { refreshTempsAsync(force: true) }
+    }
+    @objc private func setFanBoostSetting(_ sender: NSMenuItem) {
+        guard let kv = sender.representedObject as? [String: Double], let first = kv.first else { return }
+        fanBoost.setSetting(first.key, first.value)
+    }
+    private func syncFanBoostSuspension() { fanBoost?.setSuspended(isSleeping || isScreenLocked) }
+
     func menuDidClose(_ menu: NSMenu) {}
     private func desiredInterval() -> TimeInterval? {
         if isSleeping || isScreenLocked { return nil }
@@ -390,7 +463,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let v = min(999, max(0, Int(c.rounded())))
                 return .metric(label: "温度", value: String(format: "%2d\u{2009}°C", v), level: .of(Double(v), warn: 85, critical: 95))
             case .fan:
-                return .metric(label: "风扇", value: fanRpm.map { String(format: "%4d RPM", min(9999, $0)) } ?? "--", level: .normal)
+                // Forced boost shows in the warn color so it's obvious the system isn't in charge
+                return .metric(label: "风扇", value: fanRpm.map { String(format: "%4d RPM", min(9999, $0)) } ?? "--",
+                               level: fanBoost?.isBoosted == true ? .warn : .normal)
             case .disk:
                 return .metric(label: "磁盘", value: pct(disk), level: .of(disk, warn: 80, critical: 92))
             case .net:
@@ -421,6 +496,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapshot.mem = sampleMemory()
         if panelVisible || keys.contains(.disk) { snapshot.disk = diskInfo(maxAge: diskMaxAge) }
         snapshot.thermal = sampleThermal()
+        // Same sensor as the panel's CPU 温度; acts only on transitions + periodic verify
+        fanBoost.evaluate(tempC: snapshot.thermal.cpuC ?? snapshot.thermal.chipC,
+                          sampleWall: snapshot.thermal.sampleWall, now: ProcessInfo.processInfo.systemUptime)
         sampleNetwork()
         tempLock.lock()
         snapshot.gpuPct = cachedGpuPct
@@ -549,10 +627,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             panel.tempCell.setPlaceholder("读取中…")
         }
+        let boosted = fanBoost.isBoosted
+        panel.fanCell.titleLabel.setText("风扇转速 · \(fanBoost.shortStatus)")
+        let fanTitleColor: NSColor = boosted ? HIG.warn : .secondaryLabelColor
+        if panel.fanCell.titleLabel.textColor != fanTitleColor { panel.fanCell.titleLabel.textColor = fanTitleColor }
+        let fanTip = fanBoost.detailStatus
+        if panel.fanCell.toolTip != fanTip { panel.fanCell.toolTip = fanTip }
         if let rpm = thermal.fanRpm {
-            panel.fanCell.setReading("\(rpm)", unit: "RPM")
+            panel.fanCell.setReading("\(rpm)", unit: "RPM", level: boosted ? .warn : .normal)
         } else {
-            panel.fanCell.setPlaceholder("无读数")
+            panel.fanCell.setPlaceholder(fanBoost.capability == .fanless ? "无风扇" : "无读数")
         }
 
         if s.disk.total == 0 {
@@ -620,6 +704,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private struct ThermalInfo {
         var chipC: Double?
         var cpuC: Double?; var gpuC: Double?; var fanRpm: Int?; var pressureLabel: String
+        var sampleWall: TimeInterval? = nil
     }
     private func sampleThermal() -> ThermalInfo {
         let pressure: String = {
@@ -631,10 +716,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             @unknown default: return "温控未知"
             }
         }()
-        tempLock.lock(); let cpu = cachedCpuC; let gpu = cachedGpuC; let fan = cachedFanRpm; tempLock.unlock()
+        tempLock.lock()
+        let cpu = cachedCpuC, gpu = cachedGpuC, fan = cachedFanRpm, wall = cachedTempWall
+        tempLock.unlock()
         // Hotter of CPU / GPU sensors
         let chip: Double? = [cpu, gpu].compactMap { $0 }.max()
-        return ThermalInfo(chipC: chip, cpuC: cpu, gpuC: gpu, fanRpm: fan, pressureLabel: pressure)
+        return ThermalInfo(chipC: chip, cpuC: cpu, gpuC: gpu, fanRpm: fan, pressureLabel: pressure, sampleWall: wall)
     }
 
     /// Resolve macmon once: README promises "macmon in PATH", but LaunchAgents get a minimal
@@ -659,7 +746,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let panelVisible = isPanelVisible
         let now = ProcessInfo.processInfo.systemUptime
         if !force {
-            if !panelVisible && !visibleStatusKeys().contains(where: { [StatusShowKey.chip, .gpu, .fan].contains($0) }) { return }
+            if !panelVisible && !fanBoost.wantsTemperature
+                && !visibleStatusKeys().contains(where: { [StatusShowKey.chip, .gpu, .fan].contains($0) }) { return }
             // 0.5 s slack so timer tolerance doesn't push a 2.5 s tick cadence to every 3rd tick
             if !panelVisible && now - lastMacmonLaunchWall < macmonIdleMinInterval - 0.5 { return }
         }
@@ -726,6 +814,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.tempLock.lock()
             self.cachedCpuC = cpu; self.cachedGpuC = gpu; self.cachedFanRpm = fanRpm
+            self.cachedTempWall = ProcessInfo.processInfo.systemUptime
             self.cachedGpuPct = gpuPct
             self.cachedPE = (pRatio, eRatio, sRatio)
             self.tempLock.unlock()
