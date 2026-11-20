@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          clang --version
+          swiftc --version
+
+      - name: Build and run tests
+        run: ./build.sh --test
+
+      - name: Verify app bundle
+        run: |
+          test -x HardwareStatus.app/Contents/MacOS/HardwareStatus
+          plutil -lint HardwareStatus.app/Contents/Info.plist
+          plutil -lint launchd.HardwareStatus.plist.example

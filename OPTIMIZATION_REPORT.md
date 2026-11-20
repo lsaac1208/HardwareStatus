@@ -1,3 +1,50 @@
+# HardwareStatus v2.0.0: Round 2 — Native Telemetry, Correctness Fixes & Live M6 Benchmark
+
+Measured on **Apple M6 Mac mini (`Mac18,5`)**, 12 cores (`2 Super + 4 Performance + 6 Efficiency`), 32 GB RAM, macOS 27.2.1 (`26B131`).
+
+## Empirical Before / After (Idle, Panel Closed, 10 s Window)
+
+| Metric | v1.9.1 (PID 1426, `macmon` spawn) | v2.0.0 (PID 9957, Native C) | Delta |
+|---|---:|---:|---|
+| Self CPU (10 s idle) | 0.85% (407 s / 34 h) | **0.44%–0.59%** | **−31% to −48%** |
+| Child `macmon` CPU | 1.71% (1,134 s / 34 h) | **0.00%** (0 spawns) | **−100%** |
+| **Combined idle CPU** | **2.56%** | **0.44%–0.59%** | **−77% to −83%** |
+| Physical footprint (`phys_footprint`) | 42.5 MB | **17.7 MB** | **−58%** |
+| Peak physical footprint | 129.7 MB | **18.8 MB** | **−85%** |
+| Child page-ins | 14,175 | **0** | **−100%** |
+| Interrupt wakeups / 10 s | 38 | **24–33** | **−13% to −37%** |
+| Package idle wakeups / 10 s | — | **5–8** | Coalesced (20% timer tolerance) |
+
+## Root Causes Fixed in v2.0.0
+
+1. **Eliminated `macmon` subprocess burn (1.71% CPU + 14,175 page-ins)**:
+   - Old v1.9.1 spawned `macmon` every 5 s (which linked Metal, CoreML, Vision, Foundation, IOKit, and IOReport on every launch).
+   - Replaced with persistent in-process `Sources/Native/hw_smc.c` (1.89 ms/read after one-time `#KEY` stride compaction) and `Sources/Native/hw_ioreport.c` (5.7 ms/read, zero sleep, skipped completely when panel is closed and GPU is hidden from the menubar).
+2. **Fixed 41.67× Apple Silicon process CPU% error**:
+   - Old v1.9.1 divided raw Mach `pti_total_user + pti_total_system` ticks by `1e9` without `mach_timebase_info` (`125/3 = 41.6667 ns/tick` on Apple Silicon).
+   - Replaced with single-syscall `proc_pid_rusage(RUSAGE_INFO_V4)` in `Sources/Native/hw_proc.c` with exact timebase conversion and `ri_proc_start_abstime` PID-reuse detection. Verified in `CoreTests.swift` (`0.120 s` measured for `0.120 s` burn).
+3. **Fixed VPN/TUN 2× network double-counting & 32-bit byte wrap**:
+   - Old `getifaddrs()` summed both `en1` (31.7 GB) and `utun4` (59.1 GB) using 32-bit `ifi_ibytes`.
+   - Verified on macOS 27 that `NET_RT_IFLIST2` truncates counters, whereas `sysctl(IFMIB_IFDATA)` (`struct ifmibdata`) delivers exact full 64-bit byte counters. Filtered strictly to physical `en*` / `pdp_ip*` interfaces.
+4. **Cut peak memory by 85% (129.7 MB → 18.8 MB)**:
+   - `sample` + heap inspection on PID 1426 showed 72 × 272 KB multi-representation app icons retained in `iconCache`.
+   - Downsampled icons to a single `20×20 pt` (`40×40 px`) `NSBitmapImageRep` (~6 KB/app), capped at 64 entries and trimmed when popover closes.
+5. **Eliminated dynamic color closures in menubar CoreText redraws**:
+   - Pre-resolved static Dark/Light `NSColor` palettes in `StatusTitle.swift` driven by KVO on `statusItem.button?.effectiveAppearance`, plus cached `static let` fonts in `DesignSystem.swift`.
+   - Scoped global mouse-click-outside monitoring strictly to popover-open intervals.
+6. **Apple M6 3-tier CPU & real kernel memory pressure**:
+   - Auto-detects M6 `ECPU`/`MCPU`/`PCPU` (E / P / S Super cores) in `hw_ioreport.c` and renders `S 核 · P 核 · E 核` in the expanded CPU row.
+   - Replaced hardcoded `<70 / <85` memory pressure thresholds with `sysctlbyname("kern.memorystatus_vm_pressure_level")`.
+7. **Async process scanner & safer process termination**:
+   - Moved `proc_listpids` + sampling off the main thread onto a serial `.utility` queue, preserved lightweight high-CPU CLI processes (`cpu >= 0.5%`), ranked `NSRunningApplication` main PIDs above helpers/renderers, and added `EPERM` reporting + force-quit option.
+8. **Timestamp-gated smoothing & integrated `FanBoost`**:
+   - Split `DisplaySmoothing.applyTelemetry()` so async sensor completions never re-push quantized CPU/network samples, and gated GPU/thermal/power EMAs on genuinely newer sample timestamps.
+   - Integrated PR #4 (`FanBoostController` + SMC crash-guard) with read-only non-root degradation and full macOS verification (`Tests/fanboost/run.sh`).
+
+---
+
+## Historical Record: Round 1 (v1.9.1)
+
 # HardwareStatus v1.9.1: optimization round 1
 
 Scope: `HardwareStatus.swift` only. It is still one file, so `build.sh`, `hw_proc.c/h`, `Info.plist`, the LaunchAgent example and the MIT `LICENSE` are untouched. Menubar defaults (`CPU · 内存 · 温度 · 网络`), panel layout, Chinese UI strings, "no daemon" and "pause on lock/sleep" all stay the same.
