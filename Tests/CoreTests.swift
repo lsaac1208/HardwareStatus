@@ -28,6 +28,15 @@ enum CoreTestsMain {
             check(Formatters.formatRateShort(0).contains("B/s"), "short rate B/s")
             check(Formatters.formatRateShort(15 * 1024).contains("KB/s"), "short rate KB/s")
             check(Formatters.formatRateShort(12 * 1024 * 1024).contains("MB/s"), "short rate MB/s")
+            check(Formatters.formatRateTight(500) == "500 B/s", "tight rate B/s")
+            check(Formatters.formatRateTight(28.8 * 1024) == "28.8 KB/s", "tight rate KB/s < 100")
+            check(Formatters.formatRateTight(240 * 1024) == "240 KB/s", "tight rate KB/s >= 100")
+            check(Formatters.formatRateTight(1.4 * 1024 * 1024) == "1.4 MB/s", "tight rate MB/s")
+            check(Formatters.formatRateCompact(0) == "0B", "compact rate 0B")
+            check(Formatters.formatRateCompact(28.8 * 1024) == "28.8K", "compact rate KB/s < 100")
+            check(Formatters.formatRateCompact(240 * 1024) == "240K", "compact rate KB/s >= 100")
+            check(Formatters.formatRateCompact(1.4 * 1024 * 1024) == "1.4M", "compact rate MB/s")
+            check(Formatters.formatRateCompact(2.5 * 1024 * 1024 * 1024) == "2.5G", "compact rate GB/s")
             check(Formatters.formatWatts(7.34) == "7.3 W", "watts < 100")
             check(Formatters.formatWatts(125.4) == "125 W", "watts >= 100")
             check(Formatters.formatUptime(3660) == "1时1分", "uptime hours")
@@ -40,6 +49,25 @@ enum CoreTestsMain {
             check(MemPressure.from(kernelLevel: 2, fallbackPercent: 30) == .warn, "kernel warn overrides percent")
             check(MemPressure.from(kernelLevel: 4, fallbackPercent: 30) == .critical, "kernel critical overrides percent")
             check(MemPressure.from(kernelLevel: 0, fallbackPercent: 90) == .critical, "fallback when kernel unavailable")
+        }
+
+        print("HistoryRing")
+        do {
+            var ring = HistoryRing(capacity: 4)
+            check(ring.count == 0 && ring.values.isEmpty, "HistoryRing starts empty")
+            ring.push(10)
+            ring.push(20)
+            ring.push(30)
+            check(ring.count == 3 && ring.values == [10, 20, 30], "HistoryRing preserves insertion order")
+            ring.push(40)
+            ring.push(50)
+            ring.push(60)
+            check(ring.count == 4 && ring.values == [30, 40, 50, 60], "HistoryRing wraps oldest-to-newest")
+            ring.push(.nan)
+            ring.push(-5)
+            check(ring.values == [50, 60, 0, 0], "HistoryRing clamps NaN/negative to 0")
+            ring.reset()
+            check(ring.count == 0 && ring.values.isEmpty, "HistoryRing reset clears count and values")
         }
 
         print("DisplaySmoothing")
@@ -91,17 +119,33 @@ enum CoreTestsMain {
 
         print("StatusTitle")
         do {
-            let segs: [StatusSegment] = [
+            let stdSegs: [StatusSegment] = [
                 .metric(label: "CPU", value: "12%", level: .normal),
                 .metric(label: "温度", value: "38\u{2009}°C", level: .warn),
                 .rates(down: "1.2 MB/s", up: "340 KB/s")
             ]
-            let darkKey = StatusTitle.key(segs, dark: true)
-            let lightKey = StatusTitle.key(segs, dark: false)
+            let cmpSegs: [StatusSegment] = [
+                .metric(label: "CPU", value: "12%", level: .normal),
+                .metric(label: "温度", value: "38\u{2009}°C", level: .warn),
+                .rates(down: "1.2M", up: "340K")
+            ]
+            let darkKey = StatusTitle.key(cmpSegs, dark: true, style: .compact)
+            let lightKey = StatusTitle.key(cmpSegs, dark: false, style: .compact)
+            let stdKey = StatusTitle.key(cmpSegs, dark: true, style: .standard)
             check(darkKey != lightKey, "StatusTitle key distinguishes dark vs light menubar")
-            let attr = StatusTitle.attributed(segs, dark: true)
-            check(attr.length > 0, "StatusTitle attributed string non-empty")
-            check(StatusTitle.width(segs) > 40, "StatusTitle measured width positive")
+            check(darkKey != stdKey, "StatusTitle key distinguishes compact vs standard style")
+            let attrCmp = StatusTitle.attributed(cmpSegs, dark: true, style: .compact)
+            let attrStd = StatusTitle.attributed(stdSegs, dark: true, style: .standard)
+            check(attrCmp.length > 0 && attrStd.length > 0, "StatusTitle attributed strings non-empty")
+            var hasAttachment = false
+            attrCmp.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attrCmp.length), options: []) { val, _, _ in
+                if val is NSTextAttachment { hasAttachment = true }
+            }
+            check(hasAttachment, "compact menubar style uses stacked NSTextAttachment for network rates")
+            let wCmp = StatusTitle.width(cmpSegs, style: .compact)
+            let wStd = StatusTitle.width(stdSegs, style: .standard)
+            check(wCmp > 40 && wStd > wCmp + 30,
+                  String(format: "compact style (%.0f pt) is meaningfully narrower than standard (%.0f pt)", wCmp, wStd))
         }
 
         print("Native C · hw_proc_sample (Mach timebase accuracy)")

@@ -31,6 +31,55 @@ enum StatusShowKey: String, CaseIterable {
     }
 }
 
+enum MenubarStyle: String, CaseIterable, Equatable {
+    case compact = "compact"
+    case standard = "standard"
+
+    var title: String {
+        switch self {
+        case .compact: return "紧凑双行"
+        case .standard: return "标准单行"
+        }
+    }
+}
+
+/// Fixed-capacity circular buffer for live panel sparklines (~300 bytes per series, zero heap churn).
+struct HistoryRing: Equatable {
+    let capacity: Int
+    private var storage: [Double]
+    private var head: Int = 0
+    private(set) var count: Int = 0
+
+    init(capacity: Int = 36) {
+        self.capacity = max(2, capacity)
+        self.storage = Array(repeating: 0, count: max(2, capacity))
+    }
+
+    mutating func push(_ value: Double) {
+        let v = value.isFinite ? max(0, value) : 0
+        storage[head] = v
+        head = (head + 1) % capacity
+        if count < capacity { count += 1 }
+    }
+
+    mutating func reset() {
+        head = 0
+        count = 0
+    }
+
+    /// Ordered oldest → newest.
+    var values: [Double] {
+        guard count > 0 else { return [] }
+        var out = [Double]()
+        out.reserveCapacity(count)
+        let start = (head - count + capacity) % capacity
+        for i in 0..<count {
+            out.append(storage[(start + i) % capacity])
+        }
+        return out
+    }
+}
+
 enum TelemetrySource: Equatable {
     case native
     case macmon
@@ -116,6 +165,8 @@ struct AggProc {
     var name: String
     var mainPid: Int32
     var appKey: String
+    var execPath: String = ""
+    var processCount: Int = 1
     var footprint: UInt64
     var cpuPercent: Double
 }
@@ -175,6 +226,36 @@ enum Formatters {
         if v < 1024 * 1024 { return String(format: "%5.1f KB/s", v / 1024) }
         if v < 1024 * 1024 * 1024 { return String(format: "%5.1f MB/s", v / (1024 * 1024)) }
         return String(format: "%5.2f GB/s", v / (1024 * 1024 * 1024))
+    }
+
+    /// Gapless single-line rate for standard menubar mode (e.g. "28.8 KB/s", "1.4 MB/s").
+    static func formatRateTight(_ bps: Double) -> String {
+        let v = max(0, bps.isFinite ? bps : 0)
+        if v < 1024 { return String(format: "%.0f B/s", v) }
+        if v < 1024 * 1024 {
+            let k = v / 1024
+            return k >= 100 ? String(format: "%.0f KB/s", k) : String(format: "%.1f KB/s", k)
+        }
+        if v < 1024 * 1024 * 1024 {
+            let m = v / (1024 * 1024)
+            return m >= 100 ? String(format: "%.0f MB/s", m) : String(format: "%.1f MB/s", m)
+        }
+        return String(format: "%.2f GB/s", v / (1024 * 1024 * 1024))
+    }
+
+    /// Ultra-compact rate for stacked 2-line menubar mode (e.g. "0B", "28.8K", "124K", "1.4M").
+    static func formatRateCompact(_ bps: Double) -> String {
+        let v = max(0, bps.isFinite ? bps : 0)
+        if v < 1024 { return String(format: "%.0fB", v) }
+        if v < 1024 * 1024 {
+            let k = v / 1024
+            return k >= 100 ? String(format: "%.0fK", k) : String(format: "%.1fK", k)
+        }
+        if v < 1024 * 1024 * 1024 {
+            let m = v / (1024 * 1024)
+            return m >= 100 ? String(format: "%.0fM", m) : String(format: "%.1fM", m)
+        }
+        return String(format: "%.1fG", v / (1024 * 1024 * 1024))
     }
 
     static func formatWatts(_ watts: Double) -> String {

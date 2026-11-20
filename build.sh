@@ -2,8 +2,8 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="2.0.0"
-BUILD_NUM="20"
+VERSION="2.1.0"
+BUILD_NUM="21"
 ARCH="$(uname -m)"
 TARGET="${ARCH}-apple-macosx14.0"
 SDK="$(xcrun --show-sdk-path)"
@@ -62,6 +62,7 @@ SWIFT_SOURCES=(
   "$DIR/Sources/App/DesignSystem.swift"
   "$DIR/Sources/App/StatusTitle.swift"
   "$DIR/Sources/App/PanelComponents.swift"
+  "$DIR/Sources/App/SettingsView.swift"
   "$DIR/Sources/App/MonitorPanelController.swift"
   "$DIR/Sources/App/FanBoost.swift"
   "$DIR/Sources/App/SystemSampler.swift"

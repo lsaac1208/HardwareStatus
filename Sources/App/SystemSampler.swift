@@ -611,6 +611,7 @@ final class SystemSampler {
         var pid: Int32
         var name: String
         var appKey: String
+        var execPath: String
         var isHelper: Bool
         var footprint: UInt64
         var cpuPercent: Double
@@ -643,9 +644,9 @@ final class SystemSampler {
             // Keep lightweight high-CPU CLI processes in addition to >= 2 MB processes
             if sample.phys_footprint < 2 * 1024 * 1024 && cpuPct < 0.5 { continue }
 
-            let (name, appKey, isHelper) = friendlyIdentity(for: pid)
+            let (name, appKey, execPath, isHelper) = friendlyIdentity(for: pid)
             rows.append(ProcRow(
-                pid: pid, name: name, appKey: appKey, isHelper: isHelper,
+                pid: pid, name: name, appKey: appKey, execPath: execPath, isHelper: isHelper,
                 footprint: sample.phys_footprint, cpuPercent: cpuPct
             ))
         }
@@ -659,6 +660,8 @@ final class SystemSampler {
             var mainPid: Int32
             var mainRank: Int  // 2 = NSRunningApplication main process, 1 = non-helper, 0 = helper
             var mainFoot: UInt64
+            var execPath: String
+            var processCount: Int
             var footprint: UInt64
             var cpuPercent: Double
             var appKey: String
@@ -671,22 +674,29 @@ final class SystemSampler {
             if var a = map[r.appKey] {
                 a.footprint &+= r.footprint
                 a.cpuPercent += r.cpuPercent
+                a.processCount += 1
                 if rank > a.mainRank || (rank == a.mainRank && r.footprint > a.mainFoot) {
                     a.mainRank = rank
                     a.mainFoot = r.footprint
                     a.mainPid = r.pid
                     a.name = r.name
+                    a.execPath = r.execPath
                 }
                 map[r.appKey] = a
             } else {
                 map[r.appKey] = Acc(
                     name: r.name, mainPid: r.pid, mainRank: rank, mainFoot: r.footprint,
+                    execPath: r.execPath, processCount: 1,
                     footprint: r.footprint, cpuPercent: r.cpuPercent, appKey: r.appKey
                 )
             }
         }
         return map.values.map {
-            AggProc(name: $0.name, mainPid: $0.mainPid, appKey: $0.appKey, footprint: $0.footprint, cpuPercent: $0.cpuPercent)
+            AggProc(
+                name: $0.name, mainPid: $0.mainPid, appKey: $0.appKey,
+                execPath: $0.execPath, processCount: $0.processCount,
+                footprint: $0.footprint, cpuPercent: $0.cpuPercent
+            )
         }
     }
 
@@ -699,11 +709,11 @@ final class SystemSampler {
         return Array(pids.prefix(Int(filled) / MemoryLayout<Int32>.stride))
     }
 
-    private func friendlyIdentity(for pid: Int32) -> (String, String, Bool) {
+    private func friendlyIdentity(for pid: Int32) -> (String, String, String, Bool) {
         let pathLen = procPathBuf.withUnsafeMutableBufferPointer { proc_pidpath(pid, $0.baseAddress, UInt32($0.count)) }
         if pathLen > 0 {
             let path = String(cString: procPathBuf)
-            if let hit = procIdentityCache[path] { return (hit.name, hit.key, hit.isHelper) }
+            if let hit = procIdentityCache[path] { return (hit.name, hit.key, path, hit.isHelper) }
             let ident: (name: String, key: String, isHelper: Bool)
             if let range = path.range(of: ".app/") {
                 let appRoot = String(path[..<range.upperBound].dropLast())
@@ -719,14 +729,14 @@ final class SystemSampler {
             }
             if procIdentityCache.count > 1000 { procIdentityCache.removeAll(keepingCapacity: true) }
             procIdentityCache[path] = ident
-            return (ident.name, ident.key, ident.isHelper)
+            return (ident.name, ident.key, path, ident.isHelper)
         }
         var nameBuf = [CChar](repeating: 0, count: 256)
         if proc_name(pid, &nameBuf, UInt32(nameBuf.count)) > 0 {
             let n = String(cString: nameBuf)
-            return (n, "name:\(n)", false)
+            return (n, "name:\(n)", "", false)
         }
-        return ("pid \(pid)", "pid:\(pid)", false)
+        return ("pid \(pid)", "pid:\(pid)", "", false)
     }
 
     private func displayName(fromAppRoot appRoot: String) -> String? {

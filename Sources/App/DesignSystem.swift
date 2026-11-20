@@ -7,17 +7,17 @@ import QuartzCore
 /// caption 11). Fonts are cached once as static constants.
 enum HIG {
     // Panel geometry
-    static let panelW: CGFloat = 360
-    static let panelH: CGFloat = 600
+    static let panelW: CGFloat = 368
+    static let panelH: CGFloat = 620
     static let panelMinH: CGFloat = 360
-    static let panelMaxH: CGFloat = 780
+    static let panelMaxH: CGFloat = 860
     static let outerX: CGFloat = 12
     static let outerTop: CGFloat = 16
     static let outerBottom: CGFloat = 12
     static let headerInset: CGFloat = 4
     static let cardGap: CGFloat = 8
     static let cardPad: CGFloat = 12
-    static let cardRadius: CGFloat = 12
+    static let cardRadius: CGFloat = 14
     static let footerH: CGFloat = 44
     static let headerGap: CGFloat = 12
     static let contentW: CGFloat = panelW - outerX * 2
@@ -47,7 +47,7 @@ enum HIG {
     static let procCpuW: CGFloat = 52
     static let procArrowW: CGFloat = 10
     static let procColGap: CGFloat = 6
-    static let procMenuIdleAlpha: CGFloat = 0.5
+    static let procMenuIdleAlpha: CGFloat = 0.0
 
     // Cached type scale (resolved once instead of every render)
     static let title: NSFont = .systemFont(ofSize: 15, weight: .semibold)
@@ -84,17 +84,21 @@ enum HIG {
     static let memApp: NSColor = .systemGreen
     static let memWired: NSColor = .systemBlue
     static let memCompressed: NSColor = .systemPink
+    static let memSwap: NSColor = .systemOrange
+    static let cpuSuper: NSColor = .systemIndigo
+    static let cpuPerf: NSColor = .systemBlue
+    static let cpuEff: NSColor = .systemTeal
     static let netDown: NSColor = .systemBlue
     static let netUp: NSColor = .systemOrange
     static let warn: NSColor = .systemOrange
     static let critical: NSColor = .systemRed
 
-    static let track = Ink.dynamic(dark: 0.12, light: 0.08)
-    static let cardFill = Ink.dynamic(dark: 0.07, light: 0.035)
-    static let cardStroke = Ink.dynamic(dark: 0.11, light: 0.07)
+    static let track = Ink.dynamic(dark: 0.13, light: 0.09)
+    static let cardFill = Ink.dynamic(dark: 0.075, light: 0.042)
+    static let cardStroke = Ink.dynamic(dark: 0.14, light: 0.095)
     static let hover: NSColor = NSColor.labelColor.withAlphaComponent(0.06)
-    static let hairline: NSColor = NSColor.separatorColor.withAlphaComponent(0.7)
-    static let mutedInk = Ink.dynamic(dark: 0.78, light: 0.6)
+    static let hairline = Ink.dynamic(dark: 0.14, light: 0.09)
+    static let mutedInk = Ink.dynamic(dark: 0.76, light: 0.58)
     static let faintInk = Ink.dynamic(dark: 0.55, light: 0.38)
     static let tileFillAlpha: CGFloat = 0.14
     static let barFillStartAlpha: CGFloat = 0.85
@@ -228,6 +232,8 @@ final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
 final class CardView: NSView {
     let stack = NSStackView()
+    private var glassOverlay: NSView?
+
     init(_ views: [NSView], spacing: CGFloat = HIG.rowGap, padding: CGFloat = HIG.cardPad) {
         super.init(frame: .zero)
         wantsLayer = true
@@ -235,25 +241,92 @@ final class CardView: NSView {
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 0.5
         translatesAutoresizingMaskIntoConstraints = false
+
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = spacing
         stack.translatesAutoresizingMaskIntoConstraints = false
         views.forEach(stack.addArrangedSubview)
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: padding),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding)
-        ])
+
+        if #available(macOS 26.0, *) {
+            layer?.borderWidth = 0
+            let glass = NSGlassEffectView()
+            glass.style = .clear
+            glass.cornerRadius = HIG.cardRadius
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            let inner = NSView()
+            inner.translatesAutoresizingMaskIntoConstraints = false
+            inner.addSubview(stack)
+            glass.contentView = inner
+            addSubview(glass)
+            glassOverlay = glass
+            NSLayoutConstraint.activate([
+                glass.topAnchor.constraint(equalTo: topAnchor),
+                glass.leadingAnchor.constraint(equalTo: leadingAnchor),
+                glass.trailingAnchor.constraint(equalTo: trailingAnchor),
+                glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+                stack.topAnchor.constraint(equalTo: inner.topAnchor, constant: padding),
+                stack.leadingAnchor.constraint(equalTo: inner.leadingAnchor, constant: padding),
+                stack.trailingAnchor.constraint(equalTo: inner.trailingAnchor, constant: -padding),
+                stack.bottomAnchor.constraint(equalTo: inner.bottomAnchor, constant: -padding)
+            ])
+        } else {
+            addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.topAnchor.constraint(equalTo: topAnchor, constant: padding),
+                stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+                stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+                stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding)
+            ])
+        }
     }
     required init?(coder: NSCoder) { fatalError() }
     override var wantsUpdateLayer: Bool { true }
     override func updateLayer() {
-        layer?.backgroundColor = cg(HIG.cardFill, in: self)
-        layer?.borderColor = cg(HIG.cardStroke, in: self)
+        if #available(macOS 26.0, *), let glass = glassOverlay as? NSGlassEffectView {
+            let dark = Ink.isDark(effectiveAppearance)
+            glass.tintColor = dark
+                ? NSColor(white: 1.0, alpha: 0.045)
+                : NSColor(white: 1.0, alpha: 0.34)
+            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.borderColor = nil
+        } else {
+            layer?.backgroundColor = cg(HIG.cardFill, in: self)
+            layer?.borderColor = cg(HIG.cardStroke, in: self)
+        }
     }
+}
+
+/// Wraps a vertical stack of `CardView`s inside `NSGlassEffectContainerView` on macOS 26+
+/// so sibling glass surfaces batch into a single GPU pass.
+final class GlassStackHost: NSView {
+    init(content: NSView) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        content.translatesAutoresizingMaskIntoConstraints = false
+        if #available(macOS 26.0, *) {
+            let container = NSGlassEffectContainerView()
+            container.spacing = 0
+            container.translatesAutoresizingMaskIntoConstraints = false
+            container.contentView = content
+            addSubview(container)
+            NSLayoutConstraint.activate([
+                container.topAnchor.constraint(equalTo: topAnchor),
+                container.leadingAnchor.constraint(equalTo: leadingAnchor),
+                container.trailingAnchor.constraint(equalTo: trailingAnchor),
+                container.bottomAnchor.constraint(equalTo: bottomAnchor)
+            ])
+        } else {
+            addSubview(content)
+            NSLayoutConstraint.activate([
+                content.topAnchor.constraint(equalTo: topAnchor),
+                content.leadingAnchor.constraint(equalTo: leadingAnchor),
+                content.trailingAnchor.constraint(equalTo: trailingAnchor),
+                content.bottomAnchor.constraint(equalTo: bottomAnchor)
+            ])
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 final class Hairline: NSView {

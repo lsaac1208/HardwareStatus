@@ -2,6 +2,28 @@
 
 All notable changes to HardwareStatus are documented in this file.
 
+## [2.1.0] - 2026-11-20
+
+### UI/UX & Liquid Glass Overhaul
+- **Compact stacked menubar (`StatusTitle.swift`)**:
+  - Value-primary typography (`12pt` semibold tabular values at full ink vs `9.5pt` muted labels) with zero awkward leading-space gaps.
+  - New `.compact` (default) mode renders network rates as a tightly-fitted `@2x` Retina stacked 2-line attachment (`↑` over `↓`, cached to skip redundant bitmap draws), cutting menubar width by **36%** vs v1.9.1; `.standard` gapless single-line mode remains selectable.
+  - Hysteresis-based dynamic `statusItem.length` expands immediately to prevent clipping and shrinks only after 3 consecutive narrow readings to avoid jitter.
+- **macOS 26/27 Liquid Glass cards & visual craft (`DesignSystem.swift`, `PanelComponents.swift`)**:
+  - Progressive `NSGlassEffectView(style: .clear)` cards batched inside `NSGlassEffectContainerView` on macOS 26+, with clean translucent fallback on macOS 14–15.
+  - GPU `CALayer` **live sparklines** (`HistoryRing`, 36-point zero-allocation circular buffer) on CPU, GPU, and Network (dual down/up traces), rendered strictly while the popover is visible.
+  - **Structured expanded rows** across all three primary metrics (uniformly right-aligned chevrons): CPU shows M6 `S/P/E` (or M1–M5 `P/E`) mini-bars + 1m load; Memory and GPU render crisp 2×2 aligned grids with zero orphan wrapping.
+  - **Enhanced Thermal & Fan tiles**: added GPU temp/system wattage and fan RPM %/max RPM subtitles plus 3pt semantic ratio bars; clicking the Fan tile opens Settings directly.
+- **In-panel native Settings view (`SettingsView.swift`, `MonitorPanelController.swift`)**:
+  - Slide-in Settings page accessible from the footer `设置` button (and `更多 → 设置…`) with `MenubarStyle` segmented control, 1-click `↑/↓` reorder buttons + `NSSwitch` toggles for every metric, FanBoost controls, and live telemetry info.
+  - Smoothly animated popover height transitions (`0.18s`, respecting Reduce Motion) and persistent expand/sort UI preferences across launches.
+- **Actionable process rows (`AppDelegate.swift`, `PanelComponents.swift`)**:
+  - Hover-reveal `•••` button (`alpha = 0` at idle), inline relative share bars, rich multi-line tooltips (PID, aggregated process count, executable path), and click context menu (`在 Finder 中显示`, `复制 PID`, `复制路径`, `优雅退出…`, `强制结束…`).
+
+### Performance & Verification
+- **Lazy popover & panel construction**: defers creating `MonitorPanelController`, `SettingsView`, and Liquid Glass layers until first click, reducing live M6 idle physical footprint to **15.6 MB** (peak **16.4 MB**, down even further from v2.0.0's 17.7 MB) with `0.00%` child CPU.
+- Expanded `Tests/CoreTests.swift` covering `HistoryRing`, compact/tight rate formatters, and `StatusTitle` compact vs standard layout and attachment rendering.
+
 ## [2.0.0] - 2026-11-20
 
 ### Architecture & Performance

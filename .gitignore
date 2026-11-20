@@ -6,4 +6,5 @@
 build/
 DerivedData/
 *.png
+!docs/*.png
 zest-ref/

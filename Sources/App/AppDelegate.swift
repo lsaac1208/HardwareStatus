@@ -4,8 +4,8 @@ import Foundation
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
-    private var panel: MonitorPanelController!
+    private var popover: NSPopover?
+    private var panel: MonitorPanelController?
     private var prefsMenu: NSMenu!
     private var moreMenu: NSMenu!
     private var diagMenuItem: NSMenuItem!
@@ -25,12 +25,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let prefs = UserDefaults.standard
     private let prefsPrefix = "local.lsaac128.HardwareStatus."
     private let orderKey = "local.lsaac128.HardwareStatus.statusOrder"
+    private let menubarStyleKey = "local.lsaac128.HardwareStatus.menubarStyle"
+    private let uiCpuExpandedKey = "local.lsaac128.HardwareStatus.ui.cpuExpanded"
+    private let uiMemExpandedKey = "local.lsaac128.HardwareStatus.ui.memExpanded"
+    private let uiGpuExpandedKey = "local.lsaac128.HardwareStatus.ui.gpuExpanded"
+    private let uiSortByCPUKey = "local.lsaac128.HardwareStatus.ui.sortByCPU"
+
+    private var cpuHistory = HistoryRing(capacity: 36)
+    private var gpuHistory = HistoryRing(capacity: 36)
+    private var netDownHistory = HistoryRing(capacity: 36)
+    private var netUpHistory = HistoryRing(capacity: 36)
+    private var lastGpuHistoryWall: TimeInterval?
 
     private var visibleKeysCache: [StatusShowKey]?
+    private var cachedMenubarStyle: MenubarStyle?
     private var lastStatusTitleKey = ""
+    private var currentStatusLength: CGFloat = 0
+    private var shrinkStreak = 0
     private var showMenuItems: [StatusShowKey: NSMenuItem] = [:]
+    private var styleMenuItems: [MenubarStyle: NSMenuItem] = [:]
     private var orderMenu: NSMenu!
     private var iconCache: [String: NSImage] = [:]
+    private var activeMenuProc: AggProc?
     private var isScreenLocked = false
     private var isSleeping = false
     private var isPanelOpen = false
@@ -39,7 +55,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         seedDefaultsIfNeeded()
         startFanBoost()
-        buildPanel()
         buildPrefsMenu()
         buildMoreMenu()
         buildStatusItem()
@@ -74,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self = self else { return }
             self.renderStatusTitle()
             self.renderPanel()
+            if self.panel?.isShowingSettings == true { self.renderSettings() }
         }
         fanBoost.start(onTerminateSignal: { NSApp.terminate(nil) })
     }
@@ -103,29 +119,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
-        applyStatusItemLength(forPreview: longestTitleSample())
+        let initialAttr = StatusTitle.attributed(buildTitleSegments(), dark: isMenubarDark, style: menubarStyle)
+        updateStatusItemLength(contentWidth: ceil(initialAttr.size().width), force: true)
     }
 
-    private func buildPanel() {
-        panel = MonitorPanelController()
+    private func ensurePanelBuilt() {
+        guard panel == nil else { return }
+        let panel = MonitorPanelController()
         _ = panel.view
-        panel.onSortChanged = { [weak self] in self?.renderPanel() }
+        self.panel = panel
+
+        let savedSortByCPU = prefs.object(forKey: uiSortByCPUKey) == nil ? true : prefs.bool(forKey: uiSortByCPUKey)
+        panel.applySavedUIState(
+            cpuExpanded: prefs.bool(forKey: uiCpuExpandedKey),
+            memExpanded: prefs.bool(forKey: uiMemExpandedKey),
+            gpuExpanded: prefs.bool(forKey: uiGpuExpandedKey),
+            sortByCPU: savedSortByCPU
+        )
+
+        panel.onUIStateChanged = { [weak self] in
+            guard let self = self else { return }
+            self.saveUIState()
+            self.renderPanel()
+        }
         panel.onOpenActivity = { [weak self] in self?.openActivityMonitor() }
         panel.onMoreMenu = { [weak self] btn in self?.showMoreMenu(from: btn) }
+        panel.onSettingsVisibilityChanged = { [weak self] showing in
+            if showing { self?.renderSettings() }
+        }
 
-        popover = NSPopover()
-        popover.contentSize = NSSize(width: HIG.panelW, height: HIG.panelH)
-        panel.onPreferredSizeChange = { [weak self] size in self?.popover.contentSize = size }
-        popover.behavior = .transient
-        popover.animates = true
-        popover.contentViewController = panel
-        popover.delegate = self
+        panel.settingsView.onStyleChange = { [weak self] style in self?.setMenubarStyle(style) }
+        panel.settingsView.onToggleKey = { [weak self] key, on in self?.setShow(key, on: on) }
+        panel.settingsView.onMoveKey = { [weak self] key, delta in self?.moveOrder(key, delta: delta) }
+        panel.settingsView.onFanBoostToggle = { [weak self] on in self?.setFanBoostEnabled(on) }
+        panel.settingsView.onFanThresholdChange = { [weak self] val in
+            self?.fanBoost.setSetting("thresholdC", val)
+            self?.renderSettings()
+        }
+        panel.settingsView.onFanTargetChange = { [weak self] val in
+            self?.fanBoost.setSetting("targetPercent", val)
+            self?.renderSettings()
+        }
+
+        let pop = NSPopover()
+        pop.contentSize = NSSize(width: HIG.panelW, height: HIG.panelH)
+        panel.onPreferredSizeChange = { [weak self] size, animated in
+            self?.resizePopover(to: size, animated: animated)
+        }
+        pop.behavior = .transient
+        pop.animates = true
+        pop.contentViewController = panel
+        pop.delegate = self
+        self.popover = pop
+    }
+
+    private func resizePopover(to size: NSSize, animated: Bool) {
+        guard let popover = popover else { return }
+        if animated && !Motion.reduce && popover.isShown {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                popover.contentSize = size
+            }
+        } else {
+            popover.contentSize = size
+        }
     }
 
     private func buildPrefsMenu() {
         prefsMenu = NSMenu()
         prefsMenu.autoenablesItems = false
         prefsMenu.delegate = self
+
+        let styleRoot = NSMenuItem(title: "状态栏样式", action: nil, keyEquivalent: "")
+        let styleSub = NSMenu()
+        for style in MenubarStyle.allCases {
+            let mi = NSMenuItem(title: style.title, action: #selector(selectMenubarStyle(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = style.rawValue
+            mi.state = menubarStyle == style ? .on : .off
+            mi.isEnabled = true
+            styleSub.addItem(mi)
+            styleMenuItems[style] = mi
+        }
+        styleRoot.submenu = styleSub
+        prefsMenu.addItem(styleRoot)
+
         let showRoot = NSMenuItem(title: "状态栏显示", action: nil, keyEquivalent: "")
         let showSub = NSMenu()
         for key in StatusShowKey.allCases {
@@ -174,7 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings.isEnabled = true
         moreMenu.addItem(settings)
 
-        diagMenuItem = NSMenuItem(title: "v2.0.0 · 原生直采 · 无守护进程", action: nil, keyEquivalent: "")
+        diagMenuItem = NSMenuItem(title: "v2.1.0 · 原生直采 · 无守护进程", action: nil, keyEquivalent: "")
         diagMenuItem.isEnabled = false
         moreMenu.addItem(diagMenuItem)
 
@@ -192,8 +271,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showPrefsFromMore(_ sender: NSMenuItem) {
-        guard let button = statusItem.button else { return }
-        showPrefsMenu(relativeTo: button.bounds, of: button)
+        ensurePanelBuilt()
+        renderSettings()
+        panel?.setShowingSettings(true, animated: true)
     }
 
     private func showMoreMenu(from btn: NSButton) {
@@ -203,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showPrefsMenu(relativeTo rect: NSRect, of view: NSView) {
         rebuildOrderMenu()
         for (key, mi) in showMenuItems { mi.state = isShow(key) ? .on : .off }
+        for (style, mi) in styleMenuItems { mi.state = menubarStyle == style ? .on : .off }
         prefsMenu.popUp(positioning: nil, at: NSPoint(x: rect.minX, y: rect.minY), in: view)
     }
 
@@ -212,11 +293,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func togglePopover() {
         guard let button = statusItem.button else { return }
+        ensurePanelBuilt()
+        guard let popover = popover, let panel = panel else { return }
         if popover.isShown {
             popover.performClose(nil)
         } else {
             NSApp.activate(ignoringOtherApps: true)
-            panel.resetForOpen()
+            panel.prepareForOpen()
             panel.fitToContentIfNeeded()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             // popoverWillShow already sets isPanelOpen + throttle
@@ -227,10 +310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startClickOutsideMonitor() {
         guard eventMonitor == nil else { return }
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            guard let self = self, self.popover.isShown else { return }
+            guard let self = self, self.popover?.isShown == true else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                if !self.popover.isShown && self.isPanelOpen {
+                if self.popover?.isShown != true && self.isPanelOpen {
                     self.isPanelOpen = false
                     self.applyThrottle()
                 }
@@ -264,6 +347,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if prefs.array(forKey: orderKey) == nil {
             prefs.set(StatusShowKey.allCases.map(\.rawValue), forKey: orderKey)
         }
+        if prefs.string(forKey: menubarStyleKey) == nil {
+            prefs.set(MenubarStyle.compact.rawValue, forKey: menubarStyleKey)
+        }
+    }
+
+    private var menubarStyle: MenubarStyle {
+        if let cached = cachedMenubarStyle { return cached }
+        let parsed = prefs.string(forKey: menubarStyleKey).flatMap(MenubarStyle.init(rawValue:)) ?? .compact
+        cachedMenubarStyle = parsed
+        return parsed
+    }
+
+    private func setMenubarStyle(_ style: MenubarStyle) {
+        guard style != menubarStyle else { return }
+        prefs.set(style.rawValue, forKey: menubarStyleKey)
+        cachedMenubarStyle = style
+        for (s, mi) in styleMenuItems { mi.state = s == style ? .on : .off }
+        statusPrefsChanged()
+        if panel?.isShowingSettings == true { renderSettings() }
+    }
+
+    @objc private func selectMenubarStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let style = MenubarStyle(rawValue: raw) else { return }
+        setMenubarStyle(style)
+    }
+
+    private func saveUIState() {
+        guard let panel = panel else { return }
+        prefs.set(panel.cpuRow.detailExpanded, forKey: uiCpuExpandedKey)
+        prefs.set(panel.memRow.detailExpanded, forKey: uiMemExpandedKey)
+        prefs.set(panel.gpuRow.detailExpanded, forKey: uiGpuExpandedKey)
+        prefs.set(panel.sortByCPU, forKey: uiSortByCPUKey)
+    }
+
+    private func makeSettingsState() -> SettingsState {
+        let ver = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.1.0"
+        return SettingsState(
+            menubarStyle: menubarStyle,
+            order: statusOrder(),
+            visibility: Dictionary(uniqueKeysWithValues: StatusShowKey.allCases.map { ($0, isShow($0)) }),
+            fanBoostEnabled: fanBoost.enabled,
+            fanBoostWritable: fanBoost.capability == .writable,
+            fanBoostDetail: fanBoost.detailStatus,
+            fanThresholdC: fanBoost.thresholdC,
+            fanTargetPercent: fanBoost.targetPercent,
+            telemetryLabel: "HardwareStatus v\(ver) · \(sampler.telemetrySource.label) · 无守护进程"
+        )
+    }
+
+    private func renderSettings() {
+        panel?.settingsView.render(makeSettingsState())
     }
 
     private func isShow(_ key: StatusShowKey) -> Bool { prefs.bool(forKey: prefsPrefix + key.rawValue) }
@@ -301,43 +435,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func moveOrder(_ key: StatusShowKey, delta: Int) {
+        var order = statusOrder()
+        guard let idx = order.firstIndex(of: key) else { return }
+        let target = idx + delta
+        guard target >= 0 && target < order.count else { return }
+        order.swapAt(idx, target)
+        saveOrder(order)
+        rebuildOrderMenu()
+        statusPrefsChanged()
+        if panel?.isShowingSettings == true { renderSettings() }
+    }
+
     @objc private func moveOrderUp(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let key = StatusShowKey(rawValue: raw) else { return }
-        var order = statusOrder()
-        guard let i = order.firstIndex(of: key), i > 0 else { return }
-        order.swapAt(i, i - 1); saveOrder(order); rebuildOrderMenu(); statusPrefsChanged()
+        moveOrder(key, delta: -1)
     }
 
     @objc private func moveOrderDown(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let key = StatusShowKey(rawValue: raw) else { return }
-        var order = statusOrder()
-        guard let i = order.firstIndex(of: key), i < order.count - 1 else { return }
-        order.swapAt(i, i + 1); saveOrder(order); rebuildOrderMenu(); statusPrefsChanged()
+        moveOrder(key, delta: 1)
     }
 
-    @objc private func toggleShow(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let key = StatusShowKey(rawValue: raw) else { return }
-        let on = isShow(key)
-        if on {
+    private func setShow(_ key: StatusShowKey, on: Bool) {
+        if !on {
             let othersOn = StatusShowKey.allCases.filter { $0 != key && isShow($0) }
-            if othersOn.isEmpty { return }
+            if othersOn.isEmpty {
+                if panel?.isShowingSettings == true { renderSettings() }
+                return
+            }
         }
-        prefs.set(!on, forKey: prefsPrefix + key.rawValue)
-        sender.state = !on ? .on : .off
-        if !on && key == .disk { snapshot.disk = sampler.sampleDisk(maxAge: 0) }
+        prefs.set(on, forKey: prefsPrefix + key.rawValue)
+        showMenuItems[key]?.state = on ? .on : .off
+        if on && key == .disk { snapshot.disk = sampler.sampleDisk(maxAge: 0) }
         statusPrefsChanged()
-        if !on && [StatusShowKey.chip, .gpu, .fan, .power].contains(key) {
+        if on && [StatusShowKey.chip, .gpu, .fan, .power].contains(key) {
             sampler.refreshSensorsAsync(
                 panelVisible: isPanelVisible, visibleKeys: visibleStatusKeys(),
                 fanBoostWantsTemp: fanBoost.wantsTemperature, force: true
             )
         }
+        if panel?.isShowingSettings == true { renderSettings() }
+    }
+
+    @objc private func toggleShow(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let key = StatusShowKey(rawValue: raw) else { return }
+        setShow(key, on: !isShow(key))
     }
 
     private func statusPrefsChanged() {
         visibleKeysCache = nil
-        applyStatusItemLength(forPreview: longestTitleSample())
-        renderStatusTitle()
+        lastStatusTitleKey = ""
+        renderStatusTitle(forceLength: true)
     }
 
     @objc private func quit() { popover?.performClose(nil); NSApp.terminate(nil) }
@@ -359,6 +508,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isSleeping = false
         sampler.resetAfterWake()
         smooth.reset()
+        cpuHistory.reset()
+        gpuHistory.reset()
+        netDownHistory.reset()
+        netUpHistory.reset()
+        lastGpuHistoryWall = nil
         syncFanBoostSuspension()
         applyThrottle()
         updateMetrics(forceSensors: true)
@@ -377,7 +531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         if menu === moreMenu {
-            let ver = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0.0"
+            let ver = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.1.0"
             diagMenuItem.title = "v\(ver) · \(sampler.telemetrySource.label) · 无守护进程"
             rebuildFanBoostMenu()
         }
@@ -427,14 +581,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func toggleFanBoost(_ sender: NSMenuItem) {
-        fanBoost.setEnabled(!fanBoost.enabled)
+    private func setFanBoostEnabled(_ on: Bool) {
+        fanBoost.setEnabled(on)
         if fanBoost.wantsTemperature {
             sampler.refreshSensorsAsync(
                 panelVisible: isPanelVisible, visibleKeys: visibleStatusKeys(),
                 fanBoostWantsTemp: true, force: true
             )
         }
+        if panel?.isShowingSettings == true { renderSettings() }
+    }
+
+    @objc private func toggleFanBoost(_ sender: NSMenuItem) {
+        setFanBoostEnabled(!fanBoost.enabled)
     }
 
     @objc private func setFanBoostSetting(_ sender: NSMenuItem) {
@@ -474,31 +633,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menubar Title Sizing & Building
 
-    private func longestTitleSample() -> [StatusSegment] {
-        visibleStatusKeys().map { key -> StatusSegment in
-            switch key {
-            case .cpu: return .metric(label: "CPU", value: "100%", level: .normal)
-            case .gpu: return .metric(label: "GPU", value: "100%", level: .normal)
-            case .mem: return .metric(label: "内存", value: "100%", level: .normal)
-            case .chip: return .metric(label: "温度", value: "105\u{2009}°C", level: .normal)
-            case .fan: return .metric(label: "风扇", value: "9999 RPM", level: .normal)
-            case .power: return .metric(label: "功耗", value: "100 W", level: .normal)
-            case .disk: return .metric(label: "磁盘", value: "100%", level: .normal)
-            case .net: return .rates(down: Formatters.formatRateShort(999.9 * 1024 * 1024), up: Formatters.formatRateShort(999.9 * 1024 * 1024))
-            }
-        }
-    }
-
-    private func applyStatusItemLength(forPreview sample: [StatusSegment]) {
+    /// Hysteresis-based dynamic menubar sizing: expands immediately to prevent clipping,
+    /// shrinks only after 3 consecutive narrow readings to avoid jitter.
+    private func updateStatusItemLength(contentWidth: CGFloat, force: Bool) {
         let iconW: CGFloat = 16
-        statusItem.length = ceil(StatusTitle.width(sample) + iconW + 8)
+        let needed = ceil(contentWidth + iconW + 8)
+        if force || currentStatusLength <= 0 {
+            currentStatusLength = needed + 6
+            statusItem.length = currentStatusLength
+            shrinkStreak = 0
+            return
+        }
+        if needed > currentStatusLength {
+            currentStatusLength = needed + 6
+            statusItem.length = currentStatusLength
+            shrinkStreak = 0
+        } else if needed < currentStatusLength - 18 {
+            shrinkStreak += 1
+            if shrinkStreak >= 3 {
+                currentStatusLength = needed + 6
+                statusItem.length = currentStatusLength
+                shrinkStreak = 0
+            }
+        } else {
+            shrinkStreak = 0
+        }
     }
 
     private func buildTitleSegments() -> [StatusSegment] {
         let s = snapshot
-        func pct(_ v: Int) -> String { String(format: "%2d%%", min(100, max(0, v))) }
-        let downStr = Formatters.formatRateShort(s.netDown)
-        let upStr = Formatters.formatRateShort(s.netUp)
+        let style = menubarStyle
+        func pct(_ v: Int) -> String { "\(min(100, max(0, v)))%" }
+        let downStr = style == .compact ? Formatters.formatRateCompact(s.netDown) : Formatters.formatRateTight(s.netDown)
+        let upStr = style == .compact ? Formatters.formatRateCompact(s.netUp) : Formatters.formatRateTight(s.netUp)
         return visibleStatusKeys().map { key -> StatusSegment in
             switch key {
             case .cpu:
@@ -514,11 +681,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .chip:
                 guard let c = s.thermal.chipC else { return .metric(label: "温度", value: "--\u{2009}°C", level: .normal) }
                 let v = min(999, max(0, Int(c.rounded())))
-                return .metric(label: "温度", value: String(format: "%2d\u{2009}°C", v), level: .of(Double(v), warn: 85, critical: 95))
+                return .metric(label: "温度", value: "\(v)\u{2009}°C", level: .of(Double(v), warn: 85, critical: 95))
             case .fan:
                 return .metric(
                     label: "风扇",
-                    value: s.thermal.fanRpm.map { String(format: "%4d RPM", min(9999, $0)) } ?? "--",
+                    value: s.thermal.fanRpm.map { "\(min(9999, $0)) RPM" } ?? "--",
                     level: fanBoost.isBoosted ? .warn : .normal
                 )
             case .power:
@@ -554,6 +721,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rawNetDown: net.down, rawNetUp: net.up,
             now: now
         )
+        cpuHistory.push(snapshot.cpu)
+        netDownHistory.push(snapshot.netDown)
+        netUpHistory.push(snapshot.netUp)
+        recordGpuHistoryIfFresh()
         renderStatusTitle()
         if panelVisible {
             renderPanel()
@@ -571,8 +742,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let now = ProcessInfo.processInfo.systemUptime
         pullTelemetryIntoSnapshot(now: now)
         smooth.applyTelemetry(to: &snapshot, now: now)
+        recordGpuHistoryIfFresh()
         renderStatusTitle()
         if isPanelVisible { renderPanel() }
+    }
+
+    private func recordGpuHistoryIfFresh() {
+        guard let pct = snapshot.gpuPct, let wall = snapshot.gpuSampleWall else { return }
+        if lastGpuHistoryWall != wall {
+            lastGpuHistoryWall = wall
+            gpuHistory.push(pct)
+        }
     }
 
     private func pullTelemetryIntoSnapshot(now: TimeInterval) {
@@ -605,15 +785,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func renderStatusTitle() {
+    private func renderStatusTitle(forceLength: Bool = false) {
         if let button = statusItem.button {
             isMenubarDark = Ink.isDark(button.effectiveAppearance)
         }
+        let style = menubarStyle
         let segments = buildTitleSegments()
-        let key = StatusTitle.key(segments, dark: isMenubarDark)
+        let key = StatusTitle.key(segments, dark: isMenubarDark, style: style)
         if key != lastStatusTitleKey {
             lastStatusTitleKey = key
-            statusItem.button?.attributedTitle = StatusTitle.attributed(segments, dark: isMenubarDark)
+            let attr = StatusTitle.attributed(segments, dark: isMenubarDark, style: style)
+            updateStatusItemLength(contentWidth: ceil(attr.size().width), force: forceLength)
+            statusItem.button?.attributedTitle = attr
         }
     }
 
@@ -648,25 +831,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // CPU
         panel.cpuRow.setReading("\(cpuI)", level: .of(Double(cpuI), warn: 75, critical: 90))
         panel.cpuRow.track.set(Double(cpuI))
+        panel.cpuRow.sparkline?.update(primary: cpuHistory.values)
         if panel.cpuRow.detailExpanded {
-            if s.tiers.valid && s.tiers.hasSuper {
-                panel.cpuRow.setDetail(String(
-                    format: "用户 %.0f%% · 系统 %.0f%% · 负载 %.2f · S 核 %.0f%% · P 核 %.0f%% · E 核 %.0f%%",
-                    s.cpuUser, s.cpuSys, s.loadAvg1m, s.tiers.s * 100, s.tiers.p * 100, s.tiers.e * 100
-                ))
-            } else if s.tiers.valid {
-                panel.cpuRow.setDetail(String(
-                    format: "用户 %.0f%% · 系统 %.0f%% · 负载 %.2f · P 核 %.0f%% · E 核 %.0f%%",
-                    s.cpuUser, s.cpuSys, s.loadAvg1m, s.tiers.p * 100, s.tiers.e * 100
-                ))
-            } else {
-                panel.cpuRow.setDetail(String(
-                    format: "用户 %.0f%% · 系统 %.0f%% · 负载 %.2f",
-                    s.cpuUser, s.cpuSys, s.loadAvg1m
-                ))
-            }
+            panel.cpuDetail.update(user: s.cpuUser, sys: s.cpuSys, load1m: s.loadAvg1m, tiers: s.tiers)
         } else {
-            panel.cpuRow.setDetail(String(format: "用户 %.0f%% · 系统 %.0f%%", s.cpuUser, s.cpuSys))
+            panel.cpuRow.setDetail(String(format: "用户 %.0f%% · 系统 %.0f%% · 1m 负载 %.2f", s.cpuUser, s.cpuSys, s.loadAvg1m))
         }
 
         // Memory (real kernel pressure + swap)
@@ -679,16 +848,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 (Double(mem.wired), HIG.memWired),
                 (Double(mem.compressed), HIG.memCompressed)
             ], total: Double(mem.total))
-            let app = Formatters.formatBytes(mem.app)
-            let wired = Formatters.formatBytes(mem.wired)
-            let comp = Formatters.formatBytes(mem.compressed)
-            let swap = Formatters.formatBytes(mem.swapUsed)
-            panel.memRow.detailLabel.set(key: "\(app)|\(wired)|\(comp)|\(swap)") {
-                Caption().dot(HIG.memApp).text("应用\u{00A0}").value(app).gap()
-                    .dot(HIG.memWired).text("联动\u{00A0}").value(wired).gap()
-                    .dot(HIG.memCompressed).text("压缩\u{00A0}").value(comp).gap()
-                    .text("交换\u{00A0}").value(swap).string
-            }
+            panel.memDetail.update(mem: mem)
         } else {
             panel.memRow.track.set(Double(memI), warnAt: 85, criticalAt: 95)
             let usedGB = Double(mem.used) / 1_073_741_824.0
@@ -713,33 +873,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             panel.gpuRow.setPlaceholder("读取中…")
             panel.gpuRow.track.set(0)
         }
-        if let gc = thermal.gpuC, let gw = s.power.gpuW {
-            panel.gpuRow.setDetail(String(format: "GPU 温度 %.0f °C · %@", gc, Formatters.formatWatts(gw)))
-        } else if let gc = thermal.gpuC {
-            panel.gpuRow.setDetail(String(format: "GPU 温度 %.0f °C", gc))
-        } else if let gw = s.power.gpuW {
-            panel.gpuRow.setDetail("GPU 功耗 \(Formatters.formatWatts(gw))")
+        panel.gpuRow.sparkline?.update(primary: gpuHistory.values)
+        if panel.gpuRow.detailExpanded {
+            panel.gpuDetail.update(gpuC: thermal.gpuC, power: s.power)
         } else {
-            panel.gpuRow.setDetail("GPU 温度 读取中…")
+            if let gc = thermal.gpuC, let gw = s.power.gpuW {
+                panel.gpuRow.setDetail(String(format: "GPU 温度 %.0f °C · %@", gc, Formatters.formatWatts(gw)))
+            } else if let gc = thermal.gpuC {
+                panel.gpuRow.setDetail(String(format: "GPU 温度 %.0f °C", gc))
+            } else if let gw = s.power.gpuW {
+                panel.gpuRow.setDetail("GPU 功耗 \(Formatters.formatWatts(gw))")
+            } else {
+                panel.gpuRow.setDetail("GPU 温度 读取中…")
+            }
         }
 
         // Temp & Fan tiles
         if let c = thermal.cpuC ?? thermal.chipC {
             panel.tempCell.setReading(String(format: "%.0f", c), unit: "°C", level: .of(c, warn: 85, critical: 95))
+            let tempRatio = max(0.0, min(100.0, (c - 20.0) / 80.0 * 100.0))
+            panel.tempCell.track.set(tempRatio, warnAt: 81.25, criticalAt: 93.75)
         } else {
             panel.tempCell.setPlaceholder("读取中…")
+            panel.tempCell.track.set(0)
+        }
+        if let gc = thermal.gpuC, let sw = s.power.sysW {
+            panel.tempCell.setSubtitle(String(format: "GPU %.0f°C · %@", gc, Formatters.formatWatts(sw)))
+        } else if let gc = thermal.gpuC {
+            panel.tempCell.setSubtitle(String(format: "GPU %.0f°C", gc))
+        } else if let sw = s.power.sysW {
+            panel.tempCell.setSubtitle("整机功耗 \(Formatters.formatWatts(sw))")
+        } else {
+            panel.tempCell.setSubtitle("传感读取中")
         }
 
         let boosted = fanBoost.isBoosted
         panel.fanCell.titleLabel.setText("风扇转速 · \(fanBoost.shortStatus)")
         let fanTitleColor: NSColor = boosted ? HIG.warn : HIG.mutedInk
         if panel.fanCell.titleLabel.textColor != fanTitleColor { panel.fanCell.titleLabel.textColor = fanTitleColor }
-        let fanTip = fanBoost.detailStatus
+        let fanTip = "\(fanBoost.detailStatus)（点击打开设置）"
         if panel.fanCell.toolTip != fanTip { panel.fanCell.toolTip = fanTip }
         if let rpm = thermal.fanRpm {
             panel.fanCell.setReading("\(rpm)", unit: "RPM", level: boosted ? .warn : .normal)
+            if let maxRpm = thermal.fanMaxRpm, maxRpm > 0 {
+                let ratio = max(0.0, min(100.0, Double(rpm) / Double(maxRpm) * 100.0))
+                panel.fanCell.setSubtitle("\(Int(ratio.rounded()))% · 上限 \(maxRpm)", color: boosted ? HIG.warn : HIG.faintInk)
+                panel.fanCell.track.set(ratio, warnAt: 75, criticalAt: 92)
+            } else {
+                let fallbackRatio = max(0.0, min(100.0, Double(rpm) / 6000.0 * 100.0))
+                panel.fanCell.setSubtitle(rpm == 0 ? "静音停转 · 点击设置" : "自动调速 · 点击设置", color: boosted ? HIG.warn : HIG.faintInk)
+                panel.fanCell.track.set(fallbackRatio, warnAt: 75, criticalAt: 92)
+            }
         } else {
             panel.fanCell.setPlaceholder(fanBoost.capability == .fanless ? "无风扇" : "无读数")
+            panel.fanCell.setSubtitle(fanBoost.capability == .fanless ? "被动散热机型" : "点击打开设置")
+            panel.fanCell.track.set(0)
         }
 
         // Disk & Network
@@ -751,6 +939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             panel.diskRow.track.set(Double(diskI), warnAt: 80, criticalAt: 92)
         }
         panel.netRow.setRates(down: Formatters.formatRate(s.netDown), up: Formatters.formatRate(s.netUp))
+        panel.netRow.sparkline?.update(primary: netDownHistory.values, secondary: netUpHistory.values)
 
         renderProcessRows()
     }
@@ -762,6 +951,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ? Array(snapshot.procs.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(n))
             : Array(snapshot.procs.sorted { $0.footprint > $1.footprint }.prefix(n))
         panel.showProcRows(top.count)
+
+        let cpuScale = max(40.0, top.first?.cpuPercent ?? 40.0)
+        let memScale = max(Double(2 * 1024 * 1024 * 1024), Double(top.first?.footprint ?? 1) * 1.15)
         for (i, p) in top.enumerated() {
             let row = panel.topRows[i]
             row.nameLabel.setText(p.name)
@@ -770,10 +962,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             row.setSortedByCPU(panel.sortByCPU)
             row.pid = p.mainPid
             row.setIcon(iconFor(appKey: p.appKey), key: p.appKey)
-            let pid = p.mainPid, name = p.name, key = p.appKey
-            row.onMenu = { [weak self] in self?.confirmKill(pid: pid, name: name, appKey: key) }
+
+            let frac = panel.sortByCPU ? (p.cpuPercent / cpuScale) : (Double(p.footprint) / memScale)
+            row.setShare(fraction: frac, tint: panel.sortByCPU ? HIG.tintCPU : HIG.tintMem)
+
+            var tipLines = ["\(p.name)  (PID \(p.mainPid))"]
+            if p.processCount > 1 { tipLines.append("聚合 \(p.processCount) 个关联进程") }
+            if !p.execPath.isEmpty { tipLines.append(p.execPath) }
+            let tip = tipLines.joined(separator: "\n")
+            if row.toolTip != tip { row.toolTip = tip }
+
+            let proc = p
+            row.onMenu = { [weak self] anchor in self?.showProcessMenu(for: proc, anchor: anchor) }
         }
         panel.fitToContentIfNeeded()
+    }
+
+    private func resolvedRevealPath(for proc: AggProc) -> String? {
+        let raw = !proc.execPath.isEmpty ? proc.execPath : proc.appKey
+        if let range = raw.range(of: ".app") {
+            let bundle = String(raw[..<range.upperBound])
+            if FileManager.default.fileExists(atPath: bundle) { return bundle }
+        }
+        if !raw.isEmpty, FileManager.default.fileExists(atPath: raw) { return raw }
+        return nil
+    }
+
+    private func showProcessMenu(for proc: AggProc, anchor: NSView) {
+        activeMenuProc = proc
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let headerText = proc.processCount > 1
+            ? "\(proc.name) · PID \(proc.mainPid) · \(proc.processCount) 个进程"
+            : "\(proc.name) · PID \(proc.mainPid)"
+        let header = NSMenuItem(title: headerText, action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        menu.addItem(.separator())
+
+        let reveal = NSMenuItem(title: "在 Finder 中显示", action: #selector(procRevealInFinder), keyEquivalent: "")
+        reveal.target = self
+        reveal.isEnabled = resolvedRevealPath(for: proc) != nil
+        menu.addItem(reveal)
+
+        let copyPid = NSMenuItem(title: "复制 PID", action: #selector(procCopyPid), keyEquivalent: "")
+        copyPid.target = self
+        copyPid.isEnabled = true
+        menu.addItem(copyPid)
+
+        let copyPath = NSMenuItem(title: "复制路径", action: #selector(procCopyPath), keyEquivalent: "")
+        copyPath.target = self
+        copyPath.isEnabled = !proc.execPath.isEmpty || resolvedRevealPath(for: proc) != nil
+        menu.addItem(copyPath)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "优雅退出…", action: #selector(procQuitGraceful), keyEquivalent: "")
+        quitItem.target = self
+        quitItem.isEnabled = true
+        menu.addItem(quitItem)
+
+        let forceItem = NSMenuItem(title: "强制结束…", action: #selector(procQuitForce), keyEquivalent: "")
+        forceItem.target = self
+        forceItem.isEnabled = true
+        menu.addItem(forceItem)
+
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.minY), in: anchor)
+    }
+
+    @objc private func procRevealInFinder() {
+        guard let proc = activeMenuProc, let path = resolvedRevealPath(for: proc) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    @objc private func procCopyPid() {
+        guard let proc = activeMenuProc else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("\(proc.mainPid)", forType: .string)
+    }
+
+    @objc private func procCopyPath() {
+        guard let proc = activeMenuProc else { return }
+        let path = !proc.execPath.isEmpty ? proc.execPath : (resolvedRevealPath(for: proc) ?? "")
+        guard !path.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+    }
+
+    @objc private func procQuitGraceful() {
+        guard let proc = activeMenuProc else { return }
+        confirmKill(pid: proc.mainPid, name: proc.name, appKey: proc.appKey, defaultForce: false)
+    }
+
+    @objc private func procQuitForce() {
+        guard let proc = activeMenuProc else { return }
+        confirmKill(pid: proc.mainPid, name: proc.name, appKey: proc.appKey, defaultForce: true)
     }
 
     /// Downsamples NSWorkspace multi-res icons to a single 20x20 pt (@2x = 40x40 px) bitmap
@@ -820,15 +1104,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return out
     }
 
-    private func confirmKill(pid: Int32, name: String, appKey: String) {
+    private func confirmKill(pid: Int32, name: String, appKey: String, defaultForce: Bool = false) {
         let runningApp = NSRunningApplication(processIdentifier: pid)
         let alert = NSAlert()
-        alert.messageText = runningApp != nil ? "结束应用？" : "结束进程？"
-        alert.informativeText = "\(name) (PID \(pid))"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "结束")
-        alert.addButton(withTitle: "取消")
-        alert.addButton(withTitle: "强制结束")
+        if defaultForce {
+            alert.messageText = runningApp != nil ? "强制结束应用？" : "强制结束进程？"
+            alert.informativeText = "\(name) (PID \(pid))\n将立即发送强制终止信号，未保存的数据可能会丢失。"
+            alert.alertStyle = .critical
+            alert.addButton(withTitle: "强制结束")
+            alert.addButton(withTitle: "取消")
+        } else {
+            alert.messageText = runningApp != nil ? "优雅退出应用？" : "结束进程？"
+            alert.informativeText = "\(name) (PID \(pid))"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "退出")
+            alert.addButton(withTitle: "取消")
+            alert.addButton(withTitle: "强制结束")
+        }
 
         let resp = alert.runModal()
         guard resp == .alertFirstButtonReturn || resp == .alertThirdButtonReturn else { return }
@@ -836,7 +1128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSSound.beep()
             return
         }
-        let force = (resp == .alertThirdButtonReturn)
+        let force = defaultForce ? (resp == .alertFirstButtonReturn) : (resp == .alertThirdButtonReturn)
         if let app = runningApp, !app.isTerminated {
             let ok = force ? app.forceTerminate() : app.terminate()
             if ok { return }
