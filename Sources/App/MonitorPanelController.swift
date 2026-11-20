@@ -2,8 +2,8 @@ import Cocoa
 
 // MARK: - Root panel
 /// Layout (top → bottom), Control Center-style modules on the system popover material:
-///   header   系统状态 + thermal pill, chip · RAM · uptime
-///   card     CPU / 内存 / GPU metric rows
+///   header   系统状态 + thermal-ladder pill, chip · RAM · uptime
+///   card     CPU / 内存 / GPU metric rows (inset hairlines between)
 ///   tiles    CPU 温度 | 风扇转速
 ///   card     存储 / 网络
 ///   card     占用最高 process table
@@ -16,7 +16,7 @@ final class MonitorPanelController: NSViewController {
     let stack = NSStackView()
 
     let titleLabel = makeLabel("系统状态", font: HIG.title)
-    let subtitleLabel = makeLabel("", font: HIG.subtitle, color: .secondaryLabelColor)
+    let subtitleLabel = makeLabel("", font: HIG.subtitle, color: HIG.mutedInk)
     let thermalPill = StatusPill()
 
     let cpuRow = MetricRow(symbol: "cpu", title: "CPU", tint: HIG.tintCPU)
@@ -98,7 +98,10 @@ final class MonitorPanelController: NSViewController {
             m.onToggleDetail = { [weak self] in self?.onSortChanged?() }
             m.onHeightChange = { [weak self] in self?.needsFit = true }
         }
-        let resources = CardView([cpuRow, memRow, gpuRow], spacing: HIG.rowGap)
+        // Inset hairlines between rows (start at the title column): one module, calm rhythm
+        let resSeps = (0..<2).map { _ in Hairline(inset: HIG.rowSeparatorInset) }
+        resSeps.forEach { $0.widthAnchor.constraint(equalToConstant: HIG.cardInnerW).isActive = true }
+        let resources = CardView([cpuRow, resSeps[0], memRow, resSeps[1], gpuRow], spacing: HIG.rowGap)
 
         // Thermal tiles
         let thermo = NSStackView(views: [tempCell, fanCell])
@@ -110,7 +113,9 @@ final class MonitorPanelController: NSViewController {
         // IO card
         netRow.showsTrack = false
         for r in [diskRow, netRow] { r.widthAnchor.constraint(equalToConstant: HIG.cardInnerW).isActive = true }
-        let io = CardView([diskRow, netRow], spacing: 12)
+        let ioSep = Hairline(inset: HIG.rowSeparatorInset)
+        ioSep.widthAnchor.constraint(equalToConstant: HIG.cardInnerW).isActive = true
+        let io = CardView([diskRow, ioSep, netRow], spacing: HIG.rowGap)
 
         // Process card
         sortHeader.widthAnchor.constraint(equalToConstant: HIG.cardInnerW).isActive = true
@@ -132,14 +137,14 @@ final class MonitorPanelController: NSViewController {
             procViews.append(row)
         }
         let procs = CardView(procViews, spacing: 0, padding: HIG.cardPad)
-        procs.stack.setCustomSpacing(6, after: sortHeader)
+        procs.stack.setCustomSpacing(4, after: sortHeader)
         procs.stack.setCustomSpacing(4, after: headLine)
 
         for v in [resources, thermo, io, procs] as [NSView] {
             v.widthAnchor.constraint(equalToConstant: HIG.contentW).isActive = true
         }
         [header, resources, thermo, io, procs].forEach(stack.addArrangedSubview)
-        stack.setCustomSpacing(14, after: header)
+        stack.setCustomSpacing(HIG.headerGap, after: header)
 
         let clip = scroll.contentView
         NSLayoutConstraint.activate([
@@ -189,7 +194,8 @@ final class MonitorPanelController: NSViewController {
         needsFit = true
     }
 
-    func setThermal(_ text: String, color: NSColor) { thermalPill.set(text, color: color) }
+    /// `step` 1…4 lights the pill's thermal ladder (nominal → critical).
+    func setThermal(_ text: String, color: NSColor, step: Int) { thermalPill.set(text, color: color, step: step) }
 
     /// Show the first `n` process rows; hidden rows collapse in the stack.
     func showProcRows(_ n: Int) {

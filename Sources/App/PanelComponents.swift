@@ -2,7 +2,8 @@ import Cocoa
 import QuartzCore
 
 // MARK: - Bars
-/// Capsule meter: soft track, gradient fill in the metric tint, orange/red past thresholds.
+/// Slim capsule meter (Control Center style): faint track, near-flat fill in the metric tint,
+/// orange/red past thresholds.
 /// Width and color changes animate (ease-out) unless Reduce Motion is on.
 final class ProgressTrack: NSView {
     private let fill = CAGradientLayer()
@@ -37,7 +38,7 @@ final class ProgressTrack: NSView {
     private func applyFillColor(animated: Bool) {
         let c = level.color(tint: tint)
         Motion.layers(animated: animated) {
-            fill.colors = [cg(c.withAlphaComponent(0.72), in: self), cg(c, in: self)]
+            fill.colors = [cg(c.withAlphaComponent(HIG.barFillStartAlpha), in: self), cg(c, in: self)]
         }
     }
     override func layout() {
@@ -56,7 +57,7 @@ final class ProgressTrack: NSView {
     }
 }
 
-/// Stacked capsule (memory breakdown) with 1.5-pt gaps between non-empty segments.
+/// Stacked capsule (memory breakdown) with 1-pt gaps between non-empty segments.
 final class SegmentBar: NSView {
     private var parts: [(CGFloat, NSColor)] = []
     private var segLayers: [CALayer] = []
@@ -95,7 +96,7 @@ final class SegmentBar: NSView {
         super.layout()
         let animated = laidOutWidth == bounds.width
         laidOutWidth = bounds.width
-        let gap: CGFloat = 1.5
+        let gap: CGFloat = 1
         let visible = parts.indices.filter { parts[$0].0 * bounds.width >= 0.5 }
         Motion.layers(animated: animated) {
             var x: CGFloat = 0
@@ -150,12 +151,12 @@ final class MetricRow: NSView {
         expandBtn.isBordered = false
         expandBtn.imagePosition = .imageOnly
         expandBtn.translatesAutoresizingMaskIntoConstraints = false
-        expandBtn.contentTintColor = .tertiaryLabelColor
+        expandBtn.contentTintColor = HIG.faintInk
         expandBtn.target = self
         expandBtn.action = #selector(toggle)
         expandBtn.isHidden = true
         expandBtn.setAccessibilityLabel("详情")
-        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.textColor = HIG.mutedInk
         detailLabel.font = HIG.caption
         updateChevron()
         [tile, titleLabel, valueLabel, expandBtn, detailLabel, track, segments].forEach(addSubview)
@@ -207,7 +208,7 @@ final class MetricRow: NSView {
     func setPlaceholder(_ text: String) { valueLabel.setNumber(text, unit: "", placeholder: true) }
     func setDetail(_ text: String) {
         detailLabel.set(key: text) {
-            NSAttributedString(string: text, attributes: [.font: HIG.caption, .foregroundColor: NSColor.secondaryLabelColor])
+            NSAttributedString(string: text, attributes: [.font: HIG.caption, .foregroundColor: HIG.mutedInk])
         }
     }
     private func updateChevron() {
@@ -230,7 +231,7 @@ final class MetricRow: NSView {
 // MARK: - Stat tile (温度 / 风扇)
 final class StatTile: NSView {
     let tile: IconTile
-    let titleLabel = makeLabel("", font: HIG.caption, color: .secondaryLabelColor)
+    let titleLabel = makeLabel("", font: HIG.caption, color: HIG.mutedInk)
     let valueLabel = RichLabel.make()
     private let card: CardView
     init(symbol: String, title: String, tint: NSColor) {
@@ -307,19 +308,19 @@ final class IORow: NSView {
     func setUsage(percent: Int, detail: String) {
         valueLabel.set(key: "\(percent)|\(detail)") {
             Caption().text("\(percent)%", .labelColor, font: HIG.monoSmStrong)
-                .text("  " + detail, .secondaryLabelColor, font: HIG.monoSm).string
+                .text("  " + detail, HIG.mutedInk, font: HIG.monoSm).string
         }
     }
     /// "↓ 53.1 KB/s   ↑ 697.3 KB/s" with tinted arrows.
     func setRates(down: String, up: String) {
         valueLabel.set(key: "\(down)|\(up)") {
             Caption().text("↓ ", HIG.netDown, font: HIG.monoSmStrong).text(down, .labelColor, font: HIG.monoSm)
-                .text("    ↑ ", HIG.netUp, font: HIG.monoSmStrong).text(up, .labelColor, font: HIG.monoSm).string
+                .text("   ↑ ", HIG.netUp, font: HIG.monoSmStrong).text(up, .labelColor, font: HIG.monoSm).string
         }
     }
     func setMessage(_ text: String) {
         valueLabel.set(key: "msg|" + text) {
-            NSAttributedString(string: text, attributes: [.font: HIG.callout, .foregroundColor: NSColor.secondaryLabelColor])
+            NSAttributedString(string: text, attributes: [.font: HIG.callout, .foregroundColor: HIG.mutedInk])
         }
     }
 }
@@ -328,8 +329,8 @@ final class IORow: NSView {
 final class AppProcRow: NSView {
     let iconView = NSImageView()
     let nameLabel = makeLabel("", font: HIG.body)
-    let cpuLabel = makeLabel("", font: HIG.monoSm, color: .secondaryLabelColor)
-    let memLabel = makeLabel("", font: HIG.monoSm, color: .secondaryLabelColor)
+    let cpuLabel = makeLabel("", font: HIG.monoSm, color: HIG.mutedInk)
+    let memLabel = makeLabel("", font: HIG.monoSm, color: HIG.mutedInk)
     let menuBtn = NSButton()
     var onMenu: (() -> Void)?
     var pid: Int32 = 0
@@ -341,7 +342,7 @@ final class AppProcRow: NSView {
         super.init(frame: frame)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        hoverLayer.cornerRadius = 7
+        hoverLayer.cornerRadius = 6
         hoverLayer.cornerCurve = .continuous
         hoverLayer.opacity = 0
         layer?.addSublayer(hoverLayer)
@@ -354,8 +355,8 @@ final class AppProcRow: NSView {
         menuBtn.target = self
         menuBtn.action = #selector(tap)
         menuBtn.translatesAutoresizingMaskIntoConstraints = false
-        menuBtn.contentTintColor = .tertiaryLabelColor
-        menuBtn.alphaValue = 0.55
+        menuBtn.contentTintColor = HIG.mutedInk
+        menuBtn.alphaValue = HIG.procMenuIdleAlpha
         cpuLabel.alignment = .right
         memLabel.alignment = .right
         [iconView, nameLabel, cpuLabel, memLabel, menuBtn].forEach(addSubview)
@@ -386,7 +387,7 @@ final class AppProcRow: NSView {
 
     /// Emphasise whichever column the table is sorted by.
     func setSortedByCPU(_ byCPU: Bool) {
-        let on = NSColor.labelColor, off = NSColor.secondaryLabelColor
+        let on = NSColor.labelColor, off = HIG.mutedInk
         if cpuLabel.textColor != (byCPU ? on : off) { cpuLabel.textColor = byCPU ? on : off }
         if memLabel.textColor != (byCPU ? off : on) { memLabel.textColor = byCPU ? off : on }
     }
@@ -407,7 +408,7 @@ final class AppProcRow: NSView {
             let isSystem = key.hasPrefix("/System") || key.hasPrefix("/usr") || key.hasPrefix("/bin") || key.hasPrefix("/sbin")
             iconView.image = symbol(isSystem ? "gearshape.2.fill" : "app.dashed", size: 14, weight: .regular)
             iconView.imageScaling = .scaleNone
-            iconView.contentTintColor = .tertiaryLabelColor
+            iconView.contentTintColor = HIG.faintInk
         }
     }
 
@@ -430,15 +431,15 @@ final class AppProcRow: NSView {
     }
     private func applyHover() {
         Motion.layers(animated: true) { hoverLayer.opacity = hovering ? 1 : 0 }
-        menuBtn.alphaValue = hovering ? 1 : 0.55
-        menuBtn.contentTintColor = hovering ? .secondaryLabelColor : .tertiaryLabelColor
+        menuBtn.alphaValue = hovering ? 1 : HIG.procMenuIdleAlpha
+        menuBtn.contentTintColor = hovering ? .labelColor : HIG.mutedInk
     }
     override var wantsUpdateLayer: Bool { true }
     override func updateLayer() { hoverLayer.backgroundColor = cg(HIG.hover, in: self) }
 }
 
 final class SortHeader: NSView {
-    let titleLabel = makeLabel("占用最高", font: HIG.captionStrong, color: .secondaryLabelColor)
+    let titleLabel = makeLabel("占用最高", font: HIG.captionStrong, color: HIG.mutedInk)
     let cpuBtn = NSButton()
     let memBtn = NSButton()
     let arrowView = NSImageView()
@@ -487,7 +488,7 @@ final class SortHeader: NSView {
             let p = NSMutableParagraphStyle(); p.alignment = .right
             return NSAttributedString(string: s, attributes: [
                 .font: active ? HIG.captionStrong : HIG.caption,
-                .foregroundColor: active ? NSColor.labelColor : NSColor.secondaryLabelColor,
+                .foregroundColor: active ? NSColor.labelColor : HIG.mutedInk,
                 .paragraphStyle: p
             ])
         }
@@ -514,7 +515,7 @@ final class FooterButton: NSButton {
         isBordered = false
         bezelStyle = .inline
         font = HIG.callout
-        contentTintColor = .secondaryLabelColor
+        contentTintColor = HIG.mutedInk
         translatesAutoresizingMaskIntoConstraints = false
     }
     override func updateTrackingAreas() {
@@ -523,5 +524,5 @@ final class FooterButton: NSButton {
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
     override func mouseEntered(with event: NSEvent) { contentTintColor = .labelColor }
-    override func mouseExited(with event: NSEvent) { contentTintColor = .secondaryLabelColor }
+    override func mouseExited(with event: NSEvent) { contentTintColor = HIG.mutedInk }
 }
